@@ -1,0 +1,19 @@
+[Unit]
+Description=DBForge database instance manager
+Documentation=https://github.com/fiifiofosu/dbforge
+# The daemon is useless without Podman's socket, but it should still start and
+# report the problem clearly rather than refusing to run.
+Wants=podman.socket
+After=podman.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dbforged
+Restart=on-failure
+RestartSec=2
+
+# ~/.local/bin is not on the systemd user manager's PATH by default.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+
+[Install]
+WantedBy=default.target
