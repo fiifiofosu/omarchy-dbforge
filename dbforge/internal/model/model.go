@@ -92,6 +92,10 @@ type Instance struct {
 	// so a container that died on its own does not look like a deliberate stop.
 	Desired DesiredState `json:"desired" toml:"desired"`
 
+	// StartedAt is when the container last started. Derived, not persisted as
+	// truth; zero when the instance is not running.
+	StartedAt time.Time `json:"started_at" toml:"-"`
+
 	// LastExitCode is the container's exit code when it is not running. A
 	// nonzero value means an unclean stop, which for engines like Postgres
 	// means crash recovery will run on the next boot -- worth surfacing rather
@@ -149,6 +153,14 @@ func (i Instance) ShouldAutoStart() bool {
 	default:
 		return false
 	}
+}
+
+// Uptime is how long the instance has been running, or zero if it is not.
+func (i Instance) Uptime() time.Duration {
+	if i.Status != StatusRunning || i.StartedAt.IsZero() {
+		return 0
+	}
+	return time.Since(i.StartedAt)
 }
 
 func itoa(n int) string {

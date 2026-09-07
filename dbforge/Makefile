@@ -6,6 +6,7 @@ PREFIX  ?= $(HOME)/.local
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o dist/dbforge ./cmd/dbforge
+	go build -ldflags "$(LDFLAGS)" -o dist/dbforge-tui ./cmd/dbforge-tui
 
 test:
 	go test ./...
@@ -20,6 +21,7 @@ vet:
 # Install one binary under two names, as spec 5 describes.
 install: build
 	install -Dm755 dist/dbforge $(PREFIX)/bin/dbforge
+	install -Dm755 dist/dbforge-tui $(PREFIX)/bin/dbforge-tui
 	ln -sf dbforge $(PREFIX)/bin/dbforged
 	ln -sf dbforge $(PREFIX)/bin/dbctl
 	install -Dm644 packaging/dbforged.service \
@@ -33,7 +35,8 @@ install: build
 # deliberately left alone (spec 7, phase 5).
 uninstall:
 	-systemctl --user disable --now dbforged 2>/dev/null
-	rm -f $(PREFIX)/bin/dbforge $(PREFIX)/bin/dbforged $(PREFIX)/bin/dbctl
+	rm -f $(PREFIX)/bin/dbforge $(PREFIX)/bin/dbforge-tui \
+		$(PREFIX)/bin/dbforged $(PREFIX)/bin/dbctl
 	rm -f $(HOME)/.config/systemd/user/dbforged.service
 	-systemctl --user daemon-reload 2>/dev/null
 	@echo

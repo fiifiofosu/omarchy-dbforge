@@ -50,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /instances", s.handleCreate)
 	mux.HandleFunc("POST /instances/{id}/start", s.handleStart)
 	mux.HandleFunc("POST /instances/{id}/stop", s.handleStop)
+	mux.HandleFunc("POST /instances/{id}/restart", s.handleRestart)
 	mux.HandleFunc("DELETE /instances/{id}", s.handleRemove)
 	mux.HandleFunc("GET /instances/{id}/logs", s.handleLogs)
 	mux.HandleFunc("GET /instances/{id}/connstring", s.handleConnString)
@@ -93,7 +94,8 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
-	timeout := uint(10)
+	// 0 means the engine decides.
+	timeout := uint(0)
 	if v := r.URL.Query().Get("timeout"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			timeout = uint(n)
@@ -104,6 +106,20 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	timeout := uint(0)
+	if v := r.URL.Query().Get("timeout"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			timeout = uint(n)
+		}
+	}
+	if err := s.mgr.RestartInstance(r.Context(), r.PathValue("id"), timeout); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "restarted"})
 }
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {

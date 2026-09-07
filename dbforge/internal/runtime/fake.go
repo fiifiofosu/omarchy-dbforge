@@ -32,6 +32,8 @@ type Fake struct {
 	// LastCreateSpec is the spec passed to the most recent Create, so tests
 	// can assert on what was actually asked of the runtime.
 	LastCreateSpec CreateSpec
+	// lastStopTimeout records the timeout passed to the most recent Stop.
+	lastStopTimeout uint
 }
 
 func NewFake() *Fake {
@@ -108,9 +110,10 @@ func (f *Fake) Start(_ context.Context, name string) error {
 	return nil
 }
 
-func (f *Fake) Stop(_ context.Context, name string, _ uint) error {
+func (f *Fake) Stop(_ context.Context, name string, timeout uint) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastStopTimeout = timeout
 	c, ok := f.Containers[name]
 	if !ok {
 		return ErrNotFound
@@ -171,6 +174,13 @@ func (f *Fake) GetState(name string) (State, bool) {
 		return "", false
 	}
 	return c.State, true
+}
+
+// LastStopTimeout returns the timeout passed to the most recent Stop.
+func (f *Fake) LastStopTimeout() uint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastStopTimeout
 }
 
 // CreateSpecFor returns the spec recorded by the most recent Create.

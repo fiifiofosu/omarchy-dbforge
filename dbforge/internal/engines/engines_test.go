@@ -45,3 +45,32 @@ func TestPostgresDoesNotOverridePGDATA(t *testing.T) {
 		t.Fatal("postgres sets PGDATA; this breaks initdb on a bind mount")
 	}
 }
+
+// A stop timeout that is too short means SIGKILL mid-write, and crash recovery
+// on the next start. Observed with postgres: podman's 10s default killed it
+// during initdb and an ordinary stop produced exit 137.
+func TestEveryEngineDeclaresAStopTimeout(t *testing.T) {
+	for _, name := range Names() {
+		e, err := Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.StopTimeoutSecs == 0 {
+			t.Errorf("%s declares no stop timeout; it would inherit podman's 10s default", name)
+		}
+	}
+}
+
+func TestDatabaseEnginesGetGenerousStopTimeouts(t *testing.T) {
+	// The SQL engines checkpoint on shutdown and need real time.
+	for _, name := range []string{"postgres", "mysql", "mariadb"} {
+		e, err := Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.StopTimeoutSecs < 30 {
+			t.Errorf("%s stop timeout is %ds; too short for a checkpoint on shutdown",
+				name, e.StopTimeoutSecs)
+		}
+	}
+}

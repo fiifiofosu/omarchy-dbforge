@@ -37,6 +37,13 @@ type Engine struct {
 	// NeedsPassword reports whether the engine requires a generated password.
 	NeedsPassword bool
 
+	// StopTimeoutSecs is how long to let the engine shut down before podman
+	// resorts to SIGKILL. Too short and a database is killed mid-write, which
+	// means crash recovery on the next start -- observed with Postgres, where
+	// the 10s default killed it during initdb and produced exit 137 on an
+	// ordinary `dbctl stop`.
+	StopTimeoutSecs uint
+
 	// ConnString builds a ready-to-copy connection string (used by the TUI in
 	// phase 3, and by `dbctl list -o json` today).
 	ConnString func(port int, password string) string
@@ -50,6 +57,9 @@ var catalogue = map[string]Engine{
 		DataPath:        "/var/lib/postgresql/data",
 		DefaultPortBase: 15432,
 		NeedsPassword:   true,
+		// Generous: a checkpoint on a large database takes real time, and
+		// initdb on first boot is slower still.
+		StopTimeoutSecs: 60,
 		FirstRunEnv: func(pw string) map[string]string {
 			// Deliberately no custom PGDATA. The entrypoint chowns $PGDATA to
 			// the postgres user but not its parent, so pointing PGDATA at a
@@ -70,6 +80,7 @@ var catalogue = map[string]Engine{
 		DataPath:        "/var/lib/mysql",
 		DefaultPortBase: 15306,
 		NeedsPassword:   true,
+		StopTimeoutSecs: 60,
 		FirstRunEnv: func(pw string) map[string]string {
 			return map[string]string{"MYSQL_ROOT_PASSWORD": pw}
 		},
@@ -84,6 +95,7 @@ var catalogue = map[string]Engine{
 		DataPath:        "/var/lib/mysql",
 		DefaultPortBase: 15316,
 		NeedsPassword:   true,
+		StopTimeoutSecs: 60,
 		FirstRunEnv: func(pw string) map[string]string {
 			return map[string]string{"MARIADB_ROOT_PASSWORD": pw}
 		},
@@ -98,6 +110,8 @@ var catalogue = map[string]Engine{
 		DataPath:        "/data",
 		DefaultPortBase: 15379,
 		NeedsPassword:   false,
+		// Redis persists on its own schedule and shuts down quickly.
+		StopTimeoutSecs: 15,
 		FirstRunEnv:     func(string) map[string]string { return map[string]string{} },
 		ConnString: func(port int, _ string) string {
 			return fmt.Sprintf("redis://127.0.0.1:%d", port)

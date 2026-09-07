@@ -9,10 +9,10 @@ package model fights), every instance is a rootless Podman container with its
 own port and its own data directory. Creating a Postgres 16 alongside a
 Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 
-> **Status: Phase 2 complete.** Lifecycle, port allocation, persistence, drift
-> reconciliation, restart policies and reboot recovery are implemented, unit
-> tested, and verified end to end against real rootless Podman containers. The
-> TUI (Phase 3) and waybar widget (Phase 4) are not built yet.
+> **Status: Phase 3 complete.** Lifecycle, port allocation, persistence, drift
+> reconciliation, restart policies, reboot recovery and the TUI are
+> implemented, unit tested, and verified end to end against real rootless
+> Podman containers. The waybar widget (Phase 4) is not built yet.
 > See [Roadmap](#roadmap).
 
 ---
@@ -154,6 +154,57 @@ testable by hand.
 
 ---
 
+## The TUI
+
+```bash
+dbctl tui
+```
+
+A full-screen view of every instance, with actions on the selected row.
+
+```
+DBForge  local database instances
+
+  ID               ENGINE    VERSION  PORT   STATUS      RESTART    UPTIME
+> app-db           postgres  16       15432  running     always     2h14m
+  cache            redis     7        15379  stopped     no         -
+
+s start/stop   R restart   l logs   c connection   n new   d destroy   r refresh   q quit
+```
+
+| Key | Action |
+|---|---|
+| `j`/`k` or arrows | Move |
+| `s` | Start or stop the selected instance |
+| `R` | Restart it |
+| `l` or enter | Follow its logs |
+| `c` | Show the connection string |
+| `n` | Create a new instance (guided) |
+| `d` | Destroy it |
+| `r` | Refresh now |
+| `q` | Quit |
+
+**Creating** walks engine → version → name → port → restart policy. The version
+list comes from Docker Hub, filtered to plain version tags and sorted newest
+first. Offline it falls back to a cache and then to a builtin list, and says
+which it is showing rather than pretending the list is current.
+
+**Destroying** asks what should happen to the data. Removing the container and
+keeping the data is preselected, so a reflexive enter never deletes a database.
+Choosing to delete the data additionally requires typing the instance name.
+
+**Logs** stream live. Backing out cancels the stream rather than orphaning it.
+
+### Why the TUI is a separate binary
+
+`dbforge-tui` is its own executable, and `dbctl tui` runs it. Bubble Tea's
+package init queries the terminal (background colour, then a cursor-position
+report) and blocks for termenv's 5-second timeout if the terminal does not
+answer. Because that runs at *import* time, merely linking the TUI into the CLI
+made `dbctl list` take 5.03s instead of 0.05s in an environment that does not
+reply -- CI, or a bare pty. Interactive terminals answer instantly and were
+never affected, but a CLI should not depend on that.
+
 ## Restart behaviour
 
 Instances come back after a reboot. Two separate things decide whether:
@@ -264,6 +315,7 @@ uninstalling DBForge never deletes a database.
 | `DBFORGE_SUPERVISE_INTERVAL` | How often to re-check instances (default `30s`) |
 | `DBFORGE_NO_RESTORE` | Set to skip restoring instances on daemon startup |
 | `DBFORGE_SCOPE` | Isolate this installation's containers from another on the same host |
+| `DBFORGE_TUI_BIN` | Path to the TUI binary, if not beside `dbctl` |
 
 ---
 
@@ -355,6 +407,7 @@ go test -race ./...
 
 ```
 cmd/dbforge/        entry point; dispatches daemon vs CLI on argv[0]
+cmd/dbforge-tui/    the TUI, kept out of the CLI binary on purpose
 internal/model/     shared types; also the on-disk schema
 internal/engines/   the engine catalogue
 internal/ports/     port allocation, with real bind probing
@@ -362,6 +415,8 @@ internal/store/     instances.toml: atomic writes, external-edit detection
 internal/runtime/   container engine interface + Podman impl + in-memory fake
 internal/daemon/    Manager (all state) and the HTTP server
 internal/cli/       dbctl
+internal/registry/  engine version lists, cached for offline use
+internal/tui/       the Bubble Tea interface
 packaging/          systemd user unit
 ```
 
@@ -452,6 +507,15 @@ If you bind an old directory, check `dbctl logs <id>` for Postgres's own error.
 **Port conflicts** — DBForge proves a port free by binding it, so a conflict
 means something really is listening. `ss -tlnp | grep <port>` will say what.
 
+**`dbctl tui` says dbforge-tui is not found** — the TUI binary was not
+installed alongside `dbctl`. Run `make install` again, or point
+`DBFORGE_TUI_BIN` at it.
+
+**Stopping Postgres leaves it `exited(137)`** — it was killed before it
+finished shutting down. Each engine declares its own shutdown budget (60s for
+the SQL engines), so this should not happen; if it does, the machine was
+probably under heavy load.
+
 ---
 
 ## Roadmap
@@ -461,14 +525,15 @@ means something really is listening. `ss -tlnp | grep <port>` will say what.
 | 0 | Feasibility spike on Omarchy | ✅ done |
 | 1 | Daemon + CLI, lifecycle, ports, persistence, reconciliation | ✅ done, incl. integration tests |
 | 2 | systemd unit, restart safety, restart policies, reboot recovery | ✅ done; suspend/resume needs a manual run |
-| 3 | Bubble Tea TUI | ⬜ not started |
+| 3 | Bubble Tea TUI | ✅ done |
 | 4 | waybar module, then Quickshell | ⬜ not started |
 | 5 | AUR packaging | ⬜ not started |
 | 6 | `dbctl doctor`, structured logging | ⬜ partial (logging done) |
 
 Full plan: [`docs/dbforge-omarchy-implementation-plan.md`](docs/dbforge-omarchy-implementation-plan.md).
 Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),
-[`docs/phase-2-notes.md`](docs/phase-2-notes.md).
+[`docs/phase-2-notes.md`](docs/phase-2-notes.md),
+[`docs/phase-3-notes.md`](docs/phase-3-notes.md).
 
 ---
 

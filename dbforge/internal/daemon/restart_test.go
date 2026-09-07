@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
 	"github.com/fiifiofosu/dbforge/internal/ports"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
@@ -474,5 +475,47 @@ func TestSuperviseStopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Supervise did not return after its context was cancelled")
+	}
+}
+
+// A caller passing 0 must get the engine's own shutdown budget, not podman's
+// short default.
+func TestStopUsesEngineTimeoutWhenUnspecified(t *testing.T) {
+	m, fake, _, _ := rebootFixture(t)
+	if _, err := m.Create(context.Background(), CreateOptions{
+		Ref: "postgres:16", ID: "pg", Start: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Stop(context.Background(), "pg", 0); err != nil {
+		t.Fatal(err)
+	}
+	got := fake.LastStopTimeout()
+	want, _ := engines.Get("postgres")
+	if got != want.StopTimeoutSecs {
+		t.Fatalf("stop timeout = %d, want the engine's %d", got, want.StopTimeoutSecs)
+	}
+}
+
+func TestExplicitStopTimeoutWins(t *testing.T) {
+	m, fake, _, _ := rebootFixture(t)
+	m.Create(context.Background(), CreateOptions{Ref: "postgres:16", ID: "pg", Start: true})
+	if err := m.Stop(context.Background(), "pg", 5); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.LastStopTimeout(); got != 5 {
+		t.Fatalf("stop timeout = %d, want the explicit 5", got)
+	}
+}
+
+// The timeout is also baked into the container, so a `podman stop` or a host
+// shutdown gets the same budget.
+func TestStopTimeoutIsBakedIntoTheContainer(t *testing.T) {
+	m, fake, _, _ := rebootFixture(t)
+	m.Create(context.Background(), CreateOptions{Ref: "postgres:16", ID: "pg", Start: true})
+	want, _ := engines.Get("postgres")
+	if got := fake.CreateSpecFor().StopTimeoutSecs; got != want.StopTimeoutSecs {
+		t.Fatalf("container stop timeout = %d, want %d", got, want.StopTimeoutSecs)
 	}
 }

@@ -154,6 +154,7 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 		case found:
 			inst.ContainerID = c.ID
 			inst.Status = statusFrom(c)
+			inst.StartedAt = c.StartedAt
 			if inst.Status != model.StatusRunning {
 				inst.LastExitCode = c.ExitCode
 				if c.ExitCode != 0 {
@@ -449,7 +450,8 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 		Labels: inst.Labels(), HostPort: port, ContainerPort: eng.ContainerPort,
 		HostDataDir: dataDir, ContainerDataDir: eng.DataPath,
 		MemoryLimitBytes: opt.MemoryLimitBytes, NanoCPUs: opt.NanoCPUs,
-		TZ: os.Getenv("TZ"),
+		TZ:              os.Getenv("TZ"),
+		StopTimeoutSecs: eng.StopTimeoutSecs,
 		// Deliberately "no", whatever the user's policy is.
 		//
 		// Podman's own restart policy is re-evaluated when the podman service
@@ -518,10 +520,63 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 	})
 }
 
+// RestartInstance stops and starts an instance. Restarting is the most common
+// thing to want after changing a config or recovering from a wedge, and doing
+// it as one call keeps desired state consistent throughout -- a stop followed
+// by a start would briefly record the instance as deliberately stopped.
+func (m *Manager) RestartInstance(ctx context.Context, id string, timeoutSecs uint) error {
+	lock := m.lockFor(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	m.mu.Lock()
+	inst, ok := m.instances[id]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
+	}
+
+	name := inst.ContainerName()
+	if err := m.rt.Stop(ctx, name, m.stopTimeoutFor(*inst, timeoutSecs)); err != nil {
+		if errors.Is(err, runtime.ErrNotFound) {
+			inst.Status = model.StatusMissing
+			_ = m.save(false)
+			return fmt.Errorf("%w: %s", ErrContainerMissing, id)
+		}
+		return err
+	}
+	if err := m.rt.Start(ctx, name); err != nil {
+		inst.Status = model.StatusStopped
+		_ = m.save(false)
+		return fmt.Errorf("restarting %s: %w", id, err)
+	}
+
+	inst.Status = model.StatusRunning
+	inst.Desired = model.DesiredRunning
+	inst.LastExitCode = 0
+	return m.save(false)
+}
+
+// stopTimeoutFor returns the engine's shutdown budget, falling back to a safe
+// default for an engine we no longer recognise.
+func (m *Manager) stopTimeoutFor(inst model.Instance, requested uint) uint {
+	if requested > 0 {
+		return requested
+	}
+	if e, err := engines.Get(inst.Engine); err == nil && e.StopTimeoutSecs > 0 {
+		return e.StopTimeoutSecs
+	}
+	return 30
+}
+
 // Stop stops an instance.
+//
+// A timeoutSecs of 0 means "use the engine's own budget", which is almost
+// always what the caller wants: too short a timeout means SIGKILL mid-write
+// and crash recovery on the next start.
 func (m *Manager) Stop(ctx context.Context, id string, timeoutSecs uint) error {
 	return m.transition(ctx, id, func(inst *model.Instance) error {
-		if err := m.rt.Stop(ctx, inst.ContainerName(), timeoutSecs); err != nil {
+		if err := m.rt.Stop(ctx, inst.ContainerName(), m.stopTimeoutFor(*inst, timeoutSecs)); err != nil {
 			if errors.Is(err, runtime.ErrNotFound) {
 				inst.Status = model.StatusMissing
 				return fmt.Errorf("%w: %s", ErrContainerMissing, id)

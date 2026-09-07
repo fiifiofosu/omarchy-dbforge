@@ -129,6 +129,15 @@ func (c *Client) Stop(ctx context.Context, id string) error {
 	return nil
 }
 
+func (c *Client) RestartInstance(ctx context.Context, id string) error {
+	resp, err := c.do(ctx, http.MethodPost, "/instances/"+url.PathEscape(id)+"/restart", nil)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
 func (c *Client) Remove(ctx context.Context, id string, wipe, force bool) error {
 	q := fmt.Sprintf("?wipe_data=%t&force=%t", wipe, force)
 	resp, err := c.do(ctx, http.MethodDelete, "/instances/"+url.PathEscape(id)+q, nil)

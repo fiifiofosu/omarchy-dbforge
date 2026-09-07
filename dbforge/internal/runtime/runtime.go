@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 // ErrNotFound means the container or image does not exist.
@@ -35,6 +36,8 @@ type Container struct {
 	ExitCode int
 	// HostPort is the published host port, or 0 if none.
 	HostPort int
+	// StartedAt is when the container last started, used for uptime.
+	StartedAt time.Time
 }
 
 // CreateSpec describes a container to create.
@@ -54,6 +57,10 @@ type CreateSpec struct {
 	NanoCPUs         int64
 	// TZ is passed through so container log timestamps match the host (spec 8).
 	TZ string
+	// StopTimeoutSecs is baked into the container so that a stop issued
+	// outside dbforge (podman stop, or a host shutdown) also gets the engine's
+	// full shutdown budget rather than podman's 10s default.
+	StopTimeoutSecs uint
 	// RestartPolicy is podman's own policy ("no", "on-failure", "always").
 	// It covers the container dying while the host stays up; bringing
 	// instances back after a reboot is the daemon's job, since rootless

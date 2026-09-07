@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	nettypes "go.podman.io/common/libnetwork/types"
@@ -125,6 +126,11 @@ func (p *Podman) Create(_ context.Context, spec CreateSpec) (string, error) {
 
 	if spec.RestartPolicy != "" {
 		s.RestartPolicy = spec.RestartPolicy
+	}
+
+	if spec.StopTimeoutSecs > 0 {
+		t := spec.StopTimeoutSecs
+		s.StopTimeout = &t
 	}
 
 	s.PortMappings = []nettypes.PortMapping{{
@@ -245,6 +251,7 @@ func fromListContainer(c types.ListContainer) Container {
 	out := Container{
 		ID: c.ID, Name: name, State: mapState(c.State),
 		Labels: c.Labels, ExitCode: int(c.ExitCode),
+		StartedAt: time.Unix(c.StartedAt, 0),
 	}
 	for _, pm := range c.Ports {
 		if pm.HostPort != 0 {

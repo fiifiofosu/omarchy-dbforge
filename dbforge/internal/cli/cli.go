@@ -24,8 +24,10 @@ Usage:
   dbctl list [--json]
   dbctl start <id>
   dbctl stop <id>
+  dbctl restart <id>
   dbctl rm <id> [--wipe-data] [--force] [--yes]
   dbctl logs <id> [--follow] [--tail N]
+  dbctl tui
   dbctl conn <id>
   dbctl restart-policy <id> <no|on-failure|always>
   dbctl restore
@@ -57,6 +59,8 @@ func Run(ctx context.Context, args []string) int {
 		err = cmdSimple(ctx, rest, "start", "started", c.Start)
 	case "stop":
 		err = cmdSimple(ctx, rest, "stop", "stopped", c.Stop)
+	case "restart":
+		err = cmdSimple(ctx, rest, "restart", "restarted", c.RestartInstance)
 	case "rm", "remove", "destroy":
 		err = cmdRemove(ctx, c, rest)
 	case "logs":
@@ -67,6 +71,8 @@ func Run(ctx context.Context, args []string) int {
 		err = cmdRestartPolicy(ctx, c, rest)
 	case "restore":
 		err = cmdRestore(ctx, c)
+	case "tui", "ui":
+		err = runTUI()
 	case "engines":
 		fmt.Println(strings.Join(engines.Names(), "\n"))
 	default:
