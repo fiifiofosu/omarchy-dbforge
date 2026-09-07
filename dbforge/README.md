@@ -619,6 +619,34 @@ The systemd unit is a template (`packaging/dbforged.service.in`): `ExecStart`
 and `PATH` differ between a per-user install and a packaged one, so it is
 rendered at install time rather than shipped twice and allowed to diverge.
 
+### Branching and releases
+
+Work lands on `develop` and reaches `main` through a pull request. CI runs on
+those pull requests and on pushes to `develop`.
+
+**A release is a consequence of merging, not a separate step.** The version
+lives in the `VERSION` file at the repository root:
+
+```bash
+# in the pull request that should ship as 0.7.0
+echo 0.7.0 > VERSION
+```
+
+Merging that to `main` tags `v0.7.0`, builds the binaries, the source tarball
+and the Arch package, and publishes them as a GitHub release. Merging anything
+that leaves `VERSION` alone releases nothing — the workflow checks whether the
+tag already exists and stops if it does, so ordinary work does not produce a
+stream of releases. When it stops for that reason it says so in the run
+summary.
+
+Two things the workflow refuses to publish: a binary reporting `dev`, meaning
+it was never stamped with the tag, and one reporting `-dirty`, meaning the tree
+had uncommitted changes and the tag does not describe what was built. Either
+makes every bug report from that release unattributable.
+
+Pushing a `v*` tag by hand still releases, for the case where a release has to
+come from something other than the tip of `main`.
+
 ### Build tags
 
 The build always carries `containers_image_openpgp,exclude_graphdriver_btrfs`
