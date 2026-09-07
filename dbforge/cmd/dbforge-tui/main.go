@@ -16,7 +16,14 @@ import (
 	"github.com/fiifiofosu/dbforge/internal/tui"
 )
 
+// version is stamped at build time: -ldflags "-X main.version=..."
+var version = "dev"
+
 func main() {
+	// So the TUI can tell the user when it is older than the daemon, which is
+	// what a window left open across an upgrade looks like.
+	tui.Version = version
+
 	if err := tui.Run(cli.NewClient(os.Getenv("DBFORGE_SOCKET"))); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

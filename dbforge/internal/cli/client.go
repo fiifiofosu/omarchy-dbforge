@@ -151,6 +151,22 @@ func (c *Client) CreateStream(ctx context.Context, opt daemon.CreateOptions, onP
 	}
 }
 
+// Version reports the daemon's build version.
+func (c *Client) Version(ctx context.Context) (string, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/version", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.Version, nil
+}
+
 func (c *Client) Start(ctx context.Context, id string) error {
 	resp, err := c.do(ctx, http.MethodPost, "/instances/"+url.PathEscape(id)+"/start", nil)
 	if err != nil {

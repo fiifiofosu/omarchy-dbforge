@@ -71,6 +71,31 @@ pull that produces them.
 - **A cached image still reports something.** "Nothing happened and then it
   worked" is less reassuring than being told the image was already present.
 
+## A TUI left open across an upgrade
+
+The first report after shipping this was that the TUI still showed
+"creating... (pulling the image can take a while)". The installed binary was
+current -- it had the new help text and not the old one -- but the *running
+process* had started at 11:44 and the binary was replaced at 12:02.
+
+That is the ordinary consequence of an upgrade: replacing a file does not
+restart a process already executing it. The TUI is the one component people
+leave open for days, so it is the one that drifts, and the symptom is that
+everything the upgrade added simply appears not to work. Nothing said so.
+
+The daemon now serves `GET /version` and the TUI compares it against its own
+build, showing a persistent line under the title when they differ:
+
+```
+  this window is running 0.6.1, the daemon is 0.7.0 -- quit and reopen to pick up the new build
+```
+
+Persistent rather than a transient status line, because the consequence is
+persistent: a message that scrolls away after three seconds would be read once
+and wondered about for an hour. The check fails silently when the daemon is
+unreachable -- that is already reported by the instance fetch, and complaining
+twice about one problem is noise.
+
 ## Verified
 
 | Behaviour | How |
@@ -87,3 +112,4 @@ pull that produces them.
 | A streamed failure keeps its error kind | server test |
 | The non-streaming path is unchanged | server test |
 | End to end against a real daemon | `dbctl create redis:7.4`, 11 phase lines then the result |
+| A stale TUI window says so | unit tests on the notice and the list view; live `GET /version` |
