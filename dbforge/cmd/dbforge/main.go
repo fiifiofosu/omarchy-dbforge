@@ -19,6 +19,7 @@ import (
 
 	"github.com/fiifiofosu/dbforge/internal/cli"
 	"github.com/fiifiofosu/dbforge/internal/daemon"
+	"github.com/fiifiofosu/dbforge/internal/notify"
 	"github.com/fiifiofosu/dbforge/internal/ports"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
 	"github.com/fiifiofosu/dbforge/internal/store"
@@ -65,11 +66,15 @@ func runDaemon(ctx context.Context, _ []string) int {
 		return 1
 	}
 
+	notifier := notify.FromEnv(log)
+	defer notifier.Stop()
+
 	mgr := daemon.NewManager(rt, store.New(cfgPath), daemon.Config{
 		DataRoot:  dataRoot,
 		PortRange: ports.DefaultRange,
 		Log:       log,
 		Scope:     os.Getenv("DBFORGE_SCOPE"),
+		Notifier:  notifier,
 	})
 
 	// Reconcile before serving so the first request sees accurate state and

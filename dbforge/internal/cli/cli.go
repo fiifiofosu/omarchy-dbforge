@@ -28,6 +28,7 @@ Usage:
   dbctl rm <id> [--wipe-data] [--force] [--yes]
   dbctl logs <id> [--follow] [--tail N]
   dbctl tui
+  dbctl status [--waybar]
   dbctl conn <id>
   dbctl restart-policy <id> <no|on-failure|always>
   dbctl restore
@@ -71,6 +72,8 @@ func Run(ctx context.Context, args []string) int {
 		err = cmdRestartPolicy(ctx, c, rest)
 	case "restore":
 		err = cmdRestore(ctx, c)
+	case "status":
+		err = cmdStatus(ctx, c, rest)
 	case "tui", "ui":
 		err = runTUI()
 	case "engines":

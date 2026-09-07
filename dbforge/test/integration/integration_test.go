@@ -23,7 +23,6 @@ import (
 
 	"github.com/fiifiofosu/dbforge/internal/daemon"
 	"github.com/fiifiofosu/dbforge/internal/model"
-	"github.com/fiifiofosu/dbforge/internal/ports"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
 	"github.com/fiifiofosu/dbforge/internal/store"
 )
@@ -40,14 +39,17 @@ func newManager(t *testing.T) (*daemon.Manager, *runtime.Podman, string) {
 		t.Skipf("podman socket not responding: %v", err)
 	}
 
+	scope := testScope(t)
+	purgeScope(t, scope)
+
 	dir := t.TempDir()
 	dataRoot := filepath.Join(dir, "data")
 	m := daemon.NewManager(rt, store.New(filepath.Join(dir, "instances.toml")), daemon.Config{
 		DataRoot:  dataRoot,
-		PortRange: ports.Range{Low: 15700, High: 15799},
+		PortRange: portBlock(t),
 		// Own scope, so these tests never touch a real installation's
 		// containers -- and a developer's running instances never break them.
-		Scope: testScope(t),
+		Scope: scope,
 	})
 	if _, err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -65,21 +67,73 @@ func cleanup(t *testing.T, m *daemon.Manager, id string) {
 	}
 }
 
-// waitForPort waits until something accepts connections, or fails the test.
-func waitForPort(t *testing.T, port int, within time.Duration) {
+// waitReady waits until the server behind a port actually speaks its protocol.
+//
+// A port accepting connections proves nothing under rootless Podman: the
+// rootlessport forwarder binds the host port as soon as the container is
+// created, well before the database inside has finished initialising. A plain
+// dial therefore succeeds against a Postgres that is still running initdb, and
+// the test races ahead to assert on a half-built data directory or a Redis
+// that resets the connection. Every wait here speaks the real protocol.
+func waitReady(t *testing.T, port int, within time.Duration, probe func(net.Conn) error) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	var last error
 	for time.Now().Before(deadline) {
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 		if err == nil {
+			c.SetDeadline(time.Now().Add(3 * time.Second))
+			err = probe(c)
 			c.Close()
-			return
+			if err == nil {
+				return
+			}
 		}
 		last = err
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("port %d never became reachable within %s: %v", port, within, last)
+	t.Fatalf("port %d never became ready within %s: %v", port, within, last)
+}
+
+// waitForRedis waits for a PONG, which only a started redis-server sends.
+func waitForRedis(t *testing.T, port int, within time.Duration) {
+	t.Helper()
+	waitReady(t, port, within, func(c net.Conn) error {
+		if _, err := c.Write([]byte("PING\r\n")); err != nil {
+			return err
+		}
+		buf := make([]byte, 16)
+		n, err := c.Read(buf)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(buf[:n]), "PONG") {
+			return fmt.Errorf("unexpected reply %q", buf[:n])
+		}
+		return nil
+	})
+}
+
+// waitForPostgres waits for a reply to an SSLRequest, the first thing a real
+// client sends. The postmaster answers it only once it is serving, so this
+// also means initdb has finished.
+func waitForPostgres(t *testing.T, port int, within time.Duration) {
+	t.Helper()
+	waitReady(t, port, within, func(c net.Conn) error {
+		// Length 8, then the SSLRequest magic number 80877103.
+		req := []byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f}
+		if _, err := c.Write(req); err != nil {
+			return err
+		}
+		buf := make([]byte, 1)
+		if _, err := c.Read(buf); err != nil {
+			return err
+		}
+		if buf[0] != 'S' && buf[0] != 'N' {
+			return fmt.Errorf("unexpected SSLRequest reply %q", buf[0])
+		}
+		return nil
+	})
 }
 
 func TestPostgresLifecycle(t *testing.T) {
@@ -98,7 +152,7 @@ func TestPostgresLifecycle(t *testing.T) {
 
 	// Reachable from the host, which is the whole point -- the container
 	// running is not the same as the user being able to connect.
-	waitForPort(t, inst.Port, 90*time.Second)
+	waitForPostgres(t, inst.Port, 90*time.Second)
 
 	// The data directory must exist and be non-empty once initdb has run.
 	entries, err := os.ReadDir(inst.DataDir)
@@ -121,7 +175,7 @@ func TestPostgresLifecycle(t *testing.T) {
 	if err := m.Start(ctx, id); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
-	waitForPort(t, inst.Port, 90*time.Second)
+	waitForPostgres(t, inst.Port, 90*time.Second)
 }
 
 func TestRedisLifecycleAndSideBySide(t *testing.T) {
@@ -147,8 +201,8 @@ func TestRedisLifecycleAndSideBySide(t *testing.T) {
 		t.Fatal("both instances share a data directory")
 	}
 
-	waitForPort(t, ia.Port, 60*time.Second)
-	waitForPort(t, ib.Port, 60*time.Second)
+	waitForRedis(t, ia.Port, 60*time.Second)
+	waitForRedis(t, ib.Port, 60*time.Second)
 
 	// Both must answer independently.
 	for _, p := range []int{ia.Port, ib.Port} {
@@ -178,7 +232,7 @@ func TestDataSurvivesStopStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	waitForPort(t, inst.Port, 60*time.Second)
+	waitForRedis(t, inst.Port, 60*time.Second)
 
 	// Write, then force a save so the value is on disk before we stop.
 	redis(t, inst.Port, "SET", "persisted", "yes")
@@ -190,7 +244,7 @@ func TestDataSurvivesStopStart(t *testing.T) {
 	if err := m.Start(ctx, id); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForPort(t, inst.Port, 60*time.Second)
+	waitForRedis(t, inst.Port, 60*time.Second)
 
 	if got := redis(t, inst.Port, "GET", "persisted"); !strings.Contains(got, "yes") {
 		t.Fatalf("value did not survive stop/start: %q", got)
@@ -204,12 +258,13 @@ func TestWipeRemovesSubuidOwnedData(t *testing.T) {
 	ctx := context.Background()
 	m, _, _ := newManager(t)
 	const id = "it-wipe"
+	t.Cleanup(func() { cleanup(t, m, id) })
 
 	inst, err := m.Create(ctx, daemon.CreateOptions{Ref: "postgres:16", ID: id, Start: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	waitForPort(t, inst.Port, 90*time.Second)
+	waitForPostgres(t, inst.Port, 90*time.Second)
 
 	// Plain removal is expected to fail; that is the trap being covered.
 	if err := os.RemoveAll(inst.DataDir); err == nil {

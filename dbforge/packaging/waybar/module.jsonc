@@ -1,0 +1,22 @@
+// DBForge waybar module.
+//
+// Add "custom/dbforge" to one of the modules-* arrays in your waybar config,
+// then paste this object in alongside the other module definitions.
+//
+// IMPORTANT: use absolute paths. waybar is started by systemd, whose user
+// manager has no ~/.local/bin on PATH (user services never source ~/.bashrc),
+// so a bare "dbctl" resolves to nothing and the widget silently renders empty.
+// packaging/waybar/install.sh substitutes the real paths for you.
+//
+// The interval is a long fallback, not the main update path: dbforged sends
+// SIGRTMIN+8 whenever instance state changes, so the widget updates the moment
+// something happens rather than waking the CPU every few seconds.
+"custom/dbforge": {
+  "exec": "/home/YOU/.local/bin/dbctl status --waybar",
+  "return-type": "json",
+  "signal": 8,
+  "interval": 300,
+  "tooltip": true,
+  "on-click": "omarchy-launch-tui /home/YOU/.local/bin/dbforge-tui",
+  "on-click-right": "/home/YOU/.local/bin/dbforge-waybar-menu"
+}

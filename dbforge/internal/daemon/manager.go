@@ -21,6 +21,7 @@ import (
 
 	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
+	"github.com/fiifiofosu/dbforge/internal/notify"
 	"github.com/fiifiofosu/dbforge/internal/ports"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
 	"github.com/fiifiofosu/dbforge/internal/store"
@@ -51,15 +52,19 @@ type Config struct {
 	// Scope isolates this daemon's containers from any other DBForge on the
 	// same host. Empty means DefaultScope.
 	Scope string
+	// Notifier is told whenever instance state changes, so the status bar can
+	// refresh without polling. May be nil.
+	Notifier *notify.Notifier
 }
 
 // Manager is the single source of truth for instance state.
 type Manager struct {
-	rt    runtime.Runtime
-	st    *store.Store
-	cfg   Config
-	log   *slog.Logger
-	clock func() time.Time
+	rt     runtime.Runtime
+	st     *store.Store
+	cfg    Config
+	log    *slog.Logger
+	notify *notify.Notifier
+	clock  func() time.Time
 
 	// mu guards the instances map itself.
 	mu        sync.Mutex
@@ -81,7 +86,7 @@ func NewManager(rt runtime.Runtime, st *store.Store, cfg Config) *Manager {
 		cfg.Scope = DefaultScope
 	}
 	return &Manager{
-		rt: rt, st: st, cfg: cfg, log: cfg.Log,
+		rt: rt, st: st, cfg: cfg, log: cfg.Log, notify: cfg.Notifier,
 		clock:     time.Now,
 		instances: map[string]*model.Instance{},
 		locks:     map[string]*sync.Mutex{},
@@ -285,13 +290,22 @@ func (m *Manager) save(force bool) error {
 	m.mu.Unlock()
 
 	err := m.st.Save(out, force)
+	if err == nil {
+		// Hooked here rather than at each call site: every state change ends
+		// in a save, so this cannot be forgotten when a new action is added.
+		m.notify.Changed()
+	}
 	if errors.Is(err, store.ErrChangedOnDisk) {
 		// The user edited the file while we were running. Our in-memory view
 		// was just reconciled against Podman, so it is the better truth --
 		// but say so loudly rather than clobbering silently (spec 7, phase 2).
 		m.log.Warn("config changed on disk; overwriting with reconciled state",
 			"path", m.st.Path())
-		return m.st.Save(out, true)
+		err = m.st.Save(out, true)
+		if err == nil {
+			m.notify.Changed()
+		}
+		return err
 	}
 	return err
 }

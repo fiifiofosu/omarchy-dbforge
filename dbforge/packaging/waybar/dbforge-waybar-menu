@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Quick start/stop menu for the DBForge waybar module.
+#
+# Right-clicking the widget should produce an action in one gesture, not open a
+# whole interface. Anything more involved belongs in the TUI.
+set -euo pipefail
+
+# This script is launched by waybar, which systemd starts with a PATH that has
+# no ~/.local/bin -- user services never source ~/.bashrc. Put our own
+# directory first so the dbctl and dbforge-tui sitting beside us are found.
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+export PATH="$SELF_DIR:$PATH"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# menu renders a picker with whatever the system has.
+menu() {
+  local prompt="$1"
+  if have walker; then
+    walker --dmenu --placeholder "$prompt" 2>/dev/null
+  elif have fuzzel; then
+    fuzzel --dmenu --prompt "$prompt> " 2>/dev/null
+  elif have wofi; then
+    wofi --dmenu --prompt "$prompt" 2>/dev/null
+  else
+    notify-send "DBForge" "No menu program found (walker, fuzzel or wofi)" 2>/dev/null || true
+    return 1
+  fi
+}
+
+open_tui() {
+  if have omarchy-launch-tui; then
+    omarchy-launch-tui dbforge-tui
+  elif have uwsm-app; then
+    setsid uwsm-app -- xdg-terminal-exec -e dbforge-tui
+  else
+    setsid "${TERMINAL:-xdg-terminal-exec}" -e dbforge-tui
+  fi
+}
+
+if ! have dbctl; then
+  notify-send "DBForge" "dbctl is not on PATH" 2>/dev/null || true
+  exit 1
+fi
+
+# The daemon being down is its own case: offering start/stop for instances we
+# cannot see would be nonsense.
+if ! dbctl list --json >/dev/null 2>&1; then
+  choice=$(printf 'Start the dbforge daemon\nOpen DBForge' | menu "DBForge (daemon offline)") || exit 0
+  case "$choice" in
+    "Start the dbforge daemon")
+      systemctl --user start dbforged &&
+        notify-send "DBForge" "Daemon started" 2>/dev/null || true
+      ;;
+    "Open DBForge") open_tui ;;
+  esac
+  exit 0
+fi
+
+# One line per instance, formatted by dbctl rather than by this script:
+# threading quoting through bash into python into JSON is a reliable source of
+# bugs, and the Go version has tests.
+mapfile -t lines < <(dbctl status --menu)
+
+lines+=(". Open DBForge")
+
+choice=$(printf '%s\n' "${lines[@]}" | menu "DBForge") || exit 0
+[ -n "$choice" ] || exit 0
+
+if [[ "$choice" == *"Open DBForge" ]]; then
+  open_tui
+  exit 0
+fi
+
+action=$(awk '{print $2}' <<<"$choice")
+id=$(awk '{print $3}' <<<"$choice")
+[ -n "$id" ] || exit 0
+
+case "$action" in
+  Start)  dbctl start "$id" ;;
+  Stop)   dbctl stop  "$id" ;;
+  # Container only. Never --wipe-data: deleting a database must not be
+  # reachable from a bar menu.
+  Forget) dbctl rm    "$id" ;;
+  *)      exit 0 ;;
+esac

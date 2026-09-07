@@ -9,11 +9,11 @@ package model fights), every instance is a rootless Podman container with its
 own port and its own data directory. Creating a Postgres 16 alongside a
 Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 
-> **Status: Phase 3 complete.** Lifecycle, port allocation, persistence, drift
-> reconciliation, restart policies, reboot recovery and the TUI are
-> implemented, unit tested, and verified end to end against real rootless
-> Podman containers. The waybar widget (Phase 4) is not built yet.
-> See [Roadmap](#roadmap).
+> **Status: Phase 4 complete (waybar).** Lifecycle, port allocation,
+> persistence, drift reconciliation, restart policies, reboot recovery, the TUI
+> and the status bar widget are implemented, unit tested, and verified end to
+> end against real rootless Podman containers. The Quickshell module (4b) is a
+> deliberate follow-up. See [Roadmap](#roadmap).
 
 ---
 
@@ -153,6 +153,55 @@ itself on startup and on an interval; the command exists so the reboot path is
 testable by hand.
 
 ---
+
+## The status bar widget
+
+```bash
+./packaging/waybar/install.sh
+```
+
+Adds a `custom/dbforge` module to your waybar config, backing the file up first
+and refusing to double-add.
+
+| State | Shows |
+|---|---|
+| Instances running | database icon + running count |
+| All stopped | dimmed database icon |
+| No instances | dimmed database icon, tooltip explaining |
+| Something wrong | alert icon + count, in red |
+| **Daemon not running** | alert icon, in amber, tooltip with the fix |
+
+The last two rows are the point: "the daemon is down" and "you have no
+instances" are both an absence, and rendered naively they look identical. They
+need different responses, so they get different icons, classes and tooltips.
+
+**Left-click** opens the TUI in a terminal. **Right-click** gives a one-gesture
+start/stop menu through walker (or fuzzel/wofi). The menu never offers to
+delete data — that belongs behind the TUI's typed confirmation.
+
+With many instances the tooltip summarises rather than listing them all, and
+sorts anything broken to the top so it is not the row that gets truncated away.
+
+### Updates are signal-driven, not polled
+
+`dbforged` sends `SIGRTMIN+8` whenever instance state changes, and the module
+listens on that signal. The widget updates the moment something happens rather
+than waking the CPU on a timer — the plan asks for this specifically, to avoid
+battery churn. Signals are debounced, so a create that touches state several
+times produces one refresh.
+
+The module also carries `"interval": 300` as a slow fallback in case a signal
+is missed. Set `DBFORGE_WAYBAR_SIGNAL=0` to disable signalling and rely purely
+on polling.
+
+### Absolute paths matter here
+
+The installer writes absolute paths into the config, and this is not
+cosmetic: waybar is started by systemd, whose user manager has no
+`~/.local/bin` on `PATH`, because user services never source `~/.bashrc`. A
+module referring to a bare `dbctl` finds nothing and renders an **empty
+widget, silently** — no error anywhere. The same applies to the click handlers
+and inside the menu script.
 
 ## The TUI
 
@@ -316,6 +365,7 @@ uninstalling DBForge never deletes a database.
 | `DBFORGE_NO_RESTORE` | Set to skip restoring instances on daemon startup |
 | `DBFORGE_SCOPE` | Isolate this installation's containers from another on the same host |
 | `DBFORGE_TUI_BIN` | Path to the TUI binary, if not beside `dbctl` |
+| `DBFORGE_WAYBAR_SIGNAL` | SIGRTMIN offset for bar refreshes (default `8`, `0` disables) |
 
 ---
 
@@ -417,6 +467,8 @@ internal/daemon/    Manager (all state) and the HTTP server
 internal/cli/       dbctl
 internal/registry/  engine version lists, cached for offline use
 internal/tui/       the Bubble Tea interface
+internal/notify/    signals the status bar when state changes
+packaging/waybar/   module definition, styling, menu script, installer
 packaging/          systemd user unit
 ```
 
@@ -507,6 +559,14 @@ If you bind an old directory, check `dbctl logs <id>` for Postgres's own error.
 **Port conflicts** — DBForge proves a port free by binding it, so a conflict
 means something really is listening. `ss -tlnp | grep <port>` will say what.
 
+**The waybar widget shows nothing at all** — almost always PATH. waybar cannot
+see `~/.local/bin`; check the config has absolute paths, and re-run
+`./packaging/waybar/install.sh`.
+
+**The widget does not update until I click it** — the daemon signals
+`SIGRTMIN+8` only if it can find a process named `waybar`. Confirm with
+`pgrep -x waybar`.
+
 **`dbctl tui` says dbforge-tui is not found** — the TUI binary was not
 installed alongside `dbctl`. Run `make install` again, or point
 `DBFORGE_TUI_BIN` at it.
@@ -526,14 +586,16 @@ probably under heavy load.
 | 1 | Daemon + CLI, lifecycle, ports, persistence, reconciliation | ✅ done, incl. integration tests |
 | 2 | systemd unit, restart safety, restart policies, reboot recovery | ✅ done; suspend/resume needs a manual run |
 | 3 | Bubble Tea TUI | ✅ done |
-| 4 | waybar module, then Quickshell | ⬜ not started |
+| 4 | waybar module | ✅ done |
+| 4b | Quickshell module | ⬜ deferred (Omarchy 3.x is waybar-based) |
 | 5 | AUR packaging | ⬜ not started |
 | 6 | `dbctl doctor`, structured logging | ⬜ partial (logging done) |
 
 Full plan: [`docs/dbforge-omarchy-implementation-plan.md`](docs/dbforge-omarchy-implementation-plan.md).
 Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),
 [`docs/phase-2-notes.md`](docs/phase-2-notes.md),
-[`docs/phase-3-notes.md`](docs/phase-3-notes.md).
+[`docs/phase-3-notes.md`](docs/phase-3-notes.md),
+[`docs/phase-4-notes.md`](docs/phase-4-notes.md).
 
 ---
 
