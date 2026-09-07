@@ -4,6 +4,12 @@
 right shape while there are no tagged releases: nothing to publish, nothing to
 checksum, and `pkgver()` derives a monotonic version from `git describe`.
 
+**Not published.** The PKGBUILD clones this repository, which is private, so an
+AUR upload today would fail at `Retrieving sources...` for everyone but its
+author. Publishing is deferred to Phase 6, together with making the repository
+public and the first tagged release. Until then this is a package you build
+locally, and the checks below are what keep it honest in the meantime.
+
 ## Checking it
 
 ```
@@ -17,7 +23,7 @@ checks the code in front of you, and asserts on the paths the package must
 contain. Everything else in the PKGBUILD runs unmodified, so a failure there is
 a real failure. It packages `HEAD`, not the working tree — commit first.
 
-## Publishing
+## Publishing (when the repository is public)
 
 ```
 git clone ssh://aur@aur.archlinux.org/dbforge-git.git aur-dbforge-git

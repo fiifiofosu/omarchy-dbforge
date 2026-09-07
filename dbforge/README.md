@@ -64,32 +64,10 @@ replication tooling.
 | `subuid`/`subgid` entries for your user | Rootless containers. Arch sets these up by default |
 | cgroups v2 with `cpu`, `memory`, `pids` delegated | Per-instance resource limits |
 
-### From the AUR
-
-```bash
-paru -S dbforge-git      # or: yay -S dbforge-git
-```
-
-The package installs to `/usr/bin`, ships the systemd user unit in
-`/usr/lib/systemd/user/`, and enables it for all users with `systemctl
---global enable`. Two things it deliberately does not do for you, because
-neither is a package's decision to make:
-
-```bash
-systemctl --user enable --now podman.socket   # the daemon talks to this
-sudo loginctl enable-linger $USER             # so databases survive logout
-systemctl --user start dbforged
-```
-
-To keep the service from being enabled — on install and on every future
-upgrade:
-
-```bash
-sudo mkdir -p /etc/dbforge && sudo touch /etc/dbforge/no-autoenable
-sudo systemctl --global disable dbforged.service
-```
-
 ### From source
+
+This is the only install path today. The repository is private and nothing is
+published yet, so the AUR package below is built but not uploaded.
 
 ```bash
 git clone https://github.com/fiifiofosu/dbforge
@@ -109,6 +87,39 @@ per-user unit or it will keep pointing at `~/.local/bin`:
 
 ```bash
 rm ~/.config/systemd/user/dbforged.service && systemctl --user daemon-reload
+```
+
+### As an Arch package — built, not yet published
+
+`packaging/aur/dbforge-git/` is a complete, tested PKGBUILD, and
+`make pkgbuild-check` builds it and verifies what it installs. It is **not on
+the AUR**: it clones this repository, which is private, so it would fail at
+`Retrieving sources...` for anyone else. Publishing waits on the repository
+going public, which is a Phase 6 decision alongside the first tagged release.
+
+You can still build and install it locally:
+
+```bash
+packaging/aur/check.sh --install
+```
+
+That installs to `/usr/bin`, puts the systemd user unit in
+`/usr/lib/systemd/user/`, and enables it for all users with `systemctl
+--global enable`. Two things it deliberately does not do for you, because
+neither is a package's decision to make:
+
+```bash
+systemctl --user enable --now podman.socket   # the daemon talks to this
+sudo loginctl enable-linger $USER             # so databases survive logout
+systemctl --user start dbforged
+```
+
+To keep the service from being enabled — on install and on every future
+upgrade:
+
+```bash
+sudo mkdir -p /etc/dbforge && sudo touch /etc/dbforge/no-autoenable
+sudo systemctl --global disable dbforged.service
 ```
 
 ### A note on PATH
@@ -147,7 +158,7 @@ error rather than a guess — downgrade-then-upgrade never corrupts the file.
 ### Uninstalling
 
 ```bash
-sudo pacman -Rns dbforge-git    # packaged
+sudo pacman -Rns dbforge-git    # if installed as a package
 make uninstall                  # from source
 ```
 
@@ -692,8 +703,8 @@ probably under heavy load.
 | 3 | Bubble Tea TUI | ✅ done |
 | 4 | waybar module | ✅ done |
 | 4b | Quickshell module | ⬜ deferred (Omarchy 3.x is waybar-based) |
-| 5 | AUR packaging, upgrade and migration safety | ✅ done |
-| 6 | `dbctl doctor`, structured logging | ⬜ partial (logging done) |
+| 5 | AUR packaging, upgrade and migration safety | ✅ done; package built and checked, not yet published |
+| 6 | `dbctl doctor`, structured logging, first tagged release | ⬜ partial (logging done) |
 
 Full plan: [`docs/dbforge-omarchy-implementation-plan.md`](docs/dbforge-omarchy-implementation-plan.md).
 Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),

@@ -141,6 +141,21 @@ that `dbctl rm --wipe-data` has to be run *before* uninstalling, while the tool
 that understands the layout is still present. Deleting the directory by hand
 does not work anyway: the files are owned by a subuid the user cannot unlink.
 
+## Nothing is published yet
+
+The package is built and checked on every push; it is not on the AUR. It
+clones this repository, which is private, so an upload would hand every user a
+failure at `Retrieving sources...`. There are also no tags, so `pkgver()` falls
+back to a commit count (`0.0.0.r6.g69fd029`) and `--version` reports the same.
+
+Both resolve together: making the repository public and cutting the first
+tagged release. That was deliberately held for Phase 6 rather than done here --
+going public is not reversible, and a first release is worth making once, with
+`dbctl doctor` in it, rather than twice.
+
+The README says all of this where someone would otherwise copy a
+`paru -S dbforge-git` line that cannot work.
+
 ## `dbforge-bin` deferred
 
 The plan says "`dbforge-bin` or `dbforge-git`". `-git` is the one that can be
