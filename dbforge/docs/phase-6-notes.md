@@ -108,6 +108,32 @@ that release unattributable, which is worse than having no release. Both were
 found by dry-running the build steps locally against a throwaway tag -- the
 `-dirty` case actually occurred.
 
+### The Arch job caught two things on its first run
+
+Extracting the package build into a reusable workflow -- so pull requests
+exercise it, not just releases -- paid for itself immediately.
+
+The PKGBUILD's `check()` called bare `go test ./...`: the one go invocation in
+the repository not routed through the Makefile, and so the one without
+`GOTAGS`. It pulled in the btrfs graph driver, needing C headers a clean chroot
+does not have. Exactly the Phase 5 CI failure, in the last place still doing it
+by hand, and invisible locally because a developer's Arch box has those
+headers.
+
+`make test` could not be used directly either: Arch's Go packaging flags
+include `-buildmode=pie`, which the race detector refuses to combine with.
+Hence `make test-package` -- same tags, no `-race`, since CI has already run
+the race build on the same commit.
+
+`check.sh` then went green while uploading nothing. Its copy of the built
+package into `dist/` was `cp ... 2>/dev/null || true`, and `dist/` does not
+necessarily exist, since makepkg builds in its own temp directory. The script
+could print "Package left in dist/" having left nothing there.
+
+Both are now guarded closer to home: `check.sh` greps the PKGBUILD for direct
+`go build`/`go test` calls, so the next one fails in a second rather than
+seven minutes into a container build.
+
 ## Verified
 
 | Behaviour | How |
@@ -121,3 +147,5 @@ found by dry-running the build steps locally against a throwaway tag -- the
 | `DBFORGE_SOCKET` means the same thing to both ends | unit tests on override and fallback |
 | Nothing ships telemetry | dependency assertion on exporters and SDK providers |
 | Release build stamps a real version | dry-run against a throwaway tag; both gates exercised |
+| The Arch package builds on clean Arch | reusable workflow, green on both PR and develop-push triggers |
+| The PKGBUILD cannot drift off the Makefile | `check.sh` greps it for direct go invocations |
