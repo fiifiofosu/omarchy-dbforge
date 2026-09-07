@@ -139,6 +139,33 @@ func (c *Client) Remove(ctx context.Context, id string, wipe, force bool) error 
 	return nil
 }
 
+func (c *Client) SetRestartPolicy(ctx context.Context, id, policy string) error {
+	body := map[string]string{"policy": policy}
+	resp, err := c.do(ctx, http.MethodPut, "/instances/"+url.PathEscape(id)+"/restart-policy", body)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// RestoreReport mirrors daemon.RestoreReport.
+type RestoreReport struct {
+	Started []string          `json:"Started"`
+	Failed  map[string]string `json:"Failed"`
+	Skipped map[string]string `json:"Skipped"`
+}
+
+func (c *Client) Restore(ctx context.Context) (RestoreReport, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/restore", nil)
+	if err != nil {
+		return RestoreReport{}, err
+	}
+	defer resp.Body.Close()
+	var out RestoreReport
+	return out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
 func (c *Client) Logs(ctx context.Context, id string, follow bool, tail int, w io.Writer) error {
 	q := fmt.Sprintf("?follow=%t&tail=%d", follow, tail)
 	resp, err := c.do(ctx, http.MethodGet, "/instances/"+url.PathEscape(id)+"/logs"+q, nil)

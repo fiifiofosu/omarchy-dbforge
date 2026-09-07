@@ -45,6 +45,9 @@ func newManager(t *testing.T) (*daemon.Manager, *runtime.Podman, string) {
 	m := daemon.NewManager(rt, store.New(filepath.Join(dir, "instances.toml")), daemon.Config{
 		DataRoot:  dataRoot,
 		PortRange: ports.Range{Low: 15700, High: 15799},
+		// Own scope, so these tests never touch a real installation's
+		// containers -- and a developer's running instances never break them.
+		Scope: testScope(t),
 	})
 	if _, err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)

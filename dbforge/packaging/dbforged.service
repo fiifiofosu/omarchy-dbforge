@@ -1,10 +1,12 @@
 [Unit]
 Description=DBForge database instance manager
 Documentation=https://github.com/fiifiofosu/dbforge
-# The daemon is useless without Podman's socket, but it should still start and
+# The daemon is useless without podman's socket, but it should still start and
 # report the problem clearly rather than refusing to run.
 Wants=podman.socket
 After=podman.socket
+# Restoring instances needs the network up, or published ports may fail to bind.
+After=network-online.target
 
 [Service]
 Type=simple
@@ -12,8 +14,14 @@ ExecStart=%h/.local/bin/dbforged
 Restart=on-failure
 RestartSec=2
 
-# ~/.local/bin is not on the systemd user manager's PATH by default.
+# ~/.local/bin is not on the systemd user manager's PATH by default: user
+# services never source ~/.bashrc.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+
+# Stopping the daemon must not stop the databases. Containers are owned by
+# podman, not by this unit, so kill only the daemon process itself.
+KillMode=process
+TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target

@@ -123,6 +123,10 @@ func (p *Podman) Create(_ context.Context, spec CreateSpec) (string, error) {
 		s.Timezone = spec.TZ
 	}
 
+	if spec.RestartPolicy != "" {
+		s.RestartPolicy = spec.RestartPolicy
+	}
+
 	s.PortMappings = []nettypes.PortMapping{{
 		HostIP:        "127.0.0.1", // never expose an instance beyond loopback
 		HostPort:      uint16(spec.HostPort),

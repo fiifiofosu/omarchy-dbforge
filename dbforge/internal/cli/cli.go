@@ -20,12 +20,15 @@ const usage = `dbctl - manage local database instances
 
 Usage:
   dbctl create <engine:version> [--name ID] [--port N] [--no-start]
+                                [--restart no|on-failure|always]
   dbctl list [--json]
   dbctl start <id>
   dbctl stop <id>
   dbctl rm <id> [--wipe-data] [--force] [--yes]
   dbctl logs <id> [--follow] [--tail N]
   dbctl conn <id>
+  dbctl restart-policy <id> <no|on-failure|always>
+  dbctl restore
   dbctl engines
 
 Engines: %s
@@ -60,6 +63,10 @@ func Run(ctx context.Context, args []string) int {
 		err = cmdLogs(ctx, c, rest)
 	case "conn", "connstring":
 		err = cmdConn(ctx, c, rest)
+	case "restart-policy":
+		err = cmdRestartPolicy(ctx, c, rest)
+	case "restore":
+		err = cmdRestore(ctx, c)
 	case "engines":
 		fmt.Println(strings.Join(engines.Names(), "\n"))
 	default:
@@ -94,6 +101,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	name := fs.String("name", "", "instance id (default: engine+version)")
 	port := fs.Int("port", 0, "pin a host port (default: auto-allocate)")
 	noStart := fs.Bool("no-start", false, "create without starting")
+	restart := fs.String("restart", "", "restart policy: no, on-failure, always (default always)")
 
 	ref, args := splitLeadingPositional(args)
 	if err := fs.Parse(args); err != nil {
@@ -108,6 +116,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 
 	inst, err := c.Create(ctx, daemon.CreateOptions{
 		Ref: ref, ID: *name, Port: *port, Start: !*noStart,
+		Restart: model.RestartPolicy(*restart),
 	})
 	if err != nil {
 		return err
@@ -115,6 +124,7 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 
 	fmt.Printf("Created %s (%s:%s) on port %d\n", inst.ID, inst.Engine, inst.Version, inst.Port)
 	fmt.Printf("  data: %s\n", inst.DataDir)
+	fmt.Printf("  restart: %s\n", inst.Restart)
 	if cs, err := c.ConnString(ctx, inst.ID); err == nil {
 		fmt.Printf("  conn: %s\n", cs)
 	}
@@ -145,10 +155,10 @@ func cmdList(ctx context.Context, c *Client, args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tENGINE\tVERSION\tPORT\tSTATUS\tCREATED")
+	fmt.Fprintln(tw, "ID\tENGINE\tVERSION\tPORT\tSTATUS\tRESTART\tCREATED")
 	for _, i := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\n",
-			i.ID, i.Engine, i.Version, i.Port, statusLabel(i.Status), age(i.CreatedAt))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			i.ID, i.Engine, i.Version, i.Port, statusLabel(i), i.Restart, age(i.CreatedAt))
 	}
 	tw.Flush()
 
@@ -158,15 +168,60 @@ func cmdList(ctx context.Context, c *Client, args []string) error {
 				"\nwarning: %q has no container -- it was removed outside dbforge.\n"+
 					"Its data is still at %s. Use `dbctl rm %s` to forget it.\n", i.ID, i.DataDir, i.ID)
 		}
+		if i.Status != model.StatusRunning && i.LastExitCode != 0 {
+			fmt.Fprintf(os.Stderr,
+				"\nwarning: %q exited uncleanly (code %d). The engine may run crash\n"+
+					"recovery on next start. Check `dbctl logs %s`.\n", i.ID, i.LastExitCode, i.ID)
+		}
 	}
 	return nil
 }
 
-func statusLabel(s model.Status) string {
-	if s == model.StatusMissing {
+func statusLabel(i model.Instance) string {
+	switch {
+	case i.Status == model.StatusMissing:
 		return "missing(!)"
+	case i.Status != model.StatusRunning && i.LastExitCode != 0:
+		return fmt.Sprintf("exited(%d)", i.LastExitCode)
+	default:
+		return string(i.Status)
 	}
-	return string(s)
+}
+
+func cmdRestartPolicy(ctx context.Context, c *Client, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: dbctl restart-policy <id> <no|on-failure|always>")
+	}
+	if err := c.SetRestartPolicy(ctx, args[0], args[1]); err != nil {
+		return err
+	}
+	fmt.Printf("%s: restart policy set to %s\n", args[0], args[1])
+	return nil
+}
+
+// cmdRestore is mostly a diagnostic: the daemon restores on startup by itself.
+// Being able to trigger it by hand makes the reboot path testable.
+func cmdRestore(ctx context.Context, c *Client) error {
+	rep, err := c.Restore(ctx)
+	if err != nil {
+		return err
+	}
+	if len(rep.Started) == 0 && len(rep.Failed) == 0 {
+		fmt.Println("Nothing to restore.")
+	}
+	for _, id := range rep.Started {
+		fmt.Printf("started %s\n", id)
+	}
+	for id, reason := range rep.Failed {
+		fmt.Fprintf(os.Stderr, "failed to start %s: %s\n", id, reason)
+	}
+	for id, reason := range rep.Skipped {
+		fmt.Printf("skipped %s (%s)\n", id, reason)
+	}
+	if len(rep.Failed) > 0 {
+		return fmt.Errorf("%d instance(s) failed to restore", len(rep.Failed))
+	}
+	return nil
 }
 
 func age(t time.Time) string {

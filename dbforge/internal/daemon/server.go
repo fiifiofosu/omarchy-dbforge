@@ -53,6 +53,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /instances/{id}", s.handleRemove)
 	mux.HandleFunc("GET /instances/{id}/logs", s.handleLogs)
 	mux.HandleFunc("GET /instances/{id}/connstring", s.handleConnString)
+	mux.HandleFunc("PUT /instances/{id}/restart-policy", s.handleRestartPolicy)
+	mux.HandleFunc("POST /restore", s.handleRestore)
 	return mux
 }
 
@@ -141,6 +143,30 @@ func (s *Server) handleConnString(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"conn_string": cs})
+}
+
+func (s *Server) handleRestartPolicy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy string `json:"policy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if err := s.mgr.SetRestartPolicy(r.Context(), r.PathValue("id"), model.RestartPolicy(body.Policy)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"restart": body.Policy})
+}
+
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.mgr.Restore(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 type flushWriter struct {

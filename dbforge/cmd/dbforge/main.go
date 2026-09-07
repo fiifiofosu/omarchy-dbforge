@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/fiifiofosu/dbforge/internal/cli"
 	"github.com/fiifiofosu/dbforge/internal/daemon"
@@ -68,6 +69,7 @@ func runDaemon(ctx context.Context, _ []string) int {
 		DataRoot:  dataRoot,
 		PortRange: ports.DefaultRange,
 		Log:       log,
+		Scope:     os.Getenv("DBFORGE_SCOPE"),
 	})
 
 	// Reconcile before serving so the first request sees accurate state and
@@ -79,7 +81,25 @@ func runDaemon(ctx context.Context, _ []string) int {
 	}
 	log.Info("reconciled",
 		"adopted", rep.Adopted, "missing", rep.Missing, "pruned", rep.Pruned,
-		"config", cfgPath, "data_root", dataRoot)
+		"unclean", rep.Unclean, "config", cfgPath, "data_root", dataRoot)
+
+	// Bring back instances the user left running. Rootless Podman does not
+	// start containers at boot by itself, so after a reboot this is what makes
+	// an instance come back (spec 7, phase 2). Instances the user explicitly
+	// stopped are left alone.
+	if os.Getenv("DBFORGE_NO_RESTORE") == "" {
+		restored, err := mgr.Restore(ctx)
+		if err != nil {
+			log.Error("restore failed", "error", err)
+		} else if len(restored.Started) > 0 || len(restored.Failed) > 0 {
+			log.Info("restored instances",
+				"started", restored.Started, "failed", restored.Failed)
+		}
+	}
+
+	// Keep restoring while we run, not just at startup, so a crashed instance
+	// with restart=always actually comes back.
+	go mgr.Supervise(ctx, superviseInterval())
 
 	srv := daemon.NewServer(mgr, log)
 	if err := srv.Serve(ctx, daemon.SocketPath()); err != nil {
@@ -105,6 +125,18 @@ func defaultDataRoot() (string, error) {
 		dir = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(dir, "dbforge"), nil
+}
+
+// superviseInterval is how often the daemon re-checks that instances which
+// should be running actually are. Zero disables supervision.
+func superviseInterval() time.Duration {
+	if v := os.Getenv("DBFORGE_SUPERVISE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err == nil {
+			return d
+		}
+	}
+	return 30 * time.Second
 }
 
 func logLevel() slog.Level {

@@ -26,6 +26,49 @@ const (
 	StatusCreating Status = "creating"
 )
 
+// RestartPolicy says what should happen to an instance across daemon restarts
+// and host reboots (spec 7, phase 2).
+type RestartPolicy string
+
+const (
+	// RestartNo means the instance is only ever started explicitly. Choose
+	// this for a database you want off unless you ask for it.
+	RestartNo RestartPolicy = "no"
+	// RestartOnFailure brings the instance back if it exited uncleanly, but
+	// not if you stopped it deliberately.
+	RestartOnFailure RestartPolicy = "on-failure"
+	// RestartAlways brings the instance back whenever it should be running --
+	// after a crash, a daemon restart, or a reboot.
+	RestartAlways RestartPolicy = "always"
+)
+
+// DefaultRestartPolicy applies when the user does not choose. "always" matches
+// the expectation set by DBngin and by docker-compose: a database you created
+// is there tomorrow without being told again.
+const DefaultRestartPolicy = RestartAlways
+
+// ValidRestartPolicy reports whether p is one we understand.
+func ValidRestartPolicy(p RestartPolicy) bool {
+	switch p {
+	case RestartNo, RestartOnFailure, RestartAlways:
+		return true
+	}
+	return false
+}
+
+// DesiredState is what the user last asked for, as opposed to what is
+// currently true. Keeping the two apart is what lets the daemon restore
+// instances after a reboot without resurrecting ones you deliberately stopped.
+type DesiredState string
+
+const (
+	// DesiredRunning means the user created or started this instance and has
+	// not stopped it since.
+	DesiredRunning DesiredState = "running"
+	// DesiredStopped means the user explicitly stopped it.
+	DesiredStopped DesiredState = "stopped"
+)
+
 // Instance is one managed database instance.
 type Instance struct {
 	ID        string            `json:"id" toml:"id"`
@@ -41,8 +84,28 @@ type Instance struct {
 	// only as a hint for crash recovery.
 	Status Status `json:"status" toml:"status"`
 
+	// Restart is the policy for bringing this instance back automatically.
+	Restart RestartPolicy `json:"restart" toml:"restart"`
+
+	// Desired is what the user last asked for. Unlike Status it *is*
+	// authoritative when persisted: only an explicit start or stop changes it,
+	// so a container that died on its own does not look like a deliberate stop.
+	Desired DesiredState `json:"desired" toml:"desired"`
+
+	// LastExitCode is the container's exit code when it is not running. A
+	// nonzero value means an unclean stop, which for engines like Postgres
+	// means crash recovery will run on the next boot -- worth surfacing rather
+	// than masking (spec 7, phase 2).
+	LastExitCode int `json:"last_exit_code" toml:"last_exit_code"`
+
 	// ContainerID is Podman's ID for the container backing this instance.
 	ContainerID string `json:"container_id" toml:"container_id"`
+
+	// Scope isolates one DBForge installation from another on the same host.
+	// Containers are found by label, so without this a second daemon -- a test
+	// run, or a throwaway config -- would adopt the containers belonging to
+	// the real one.
+	Scope string `json:"scope" toml:"scope"`
 }
 
 // ContainerName is the Podman container name for an instance. The dbforge-
@@ -60,6 +123,31 @@ func (i Instance) Labels() map[string]string {
 		"io.dbforge.version":  i.Version,
 		"io.dbforge.port":     itoa(i.Port),
 		"io.dbforge.data_dir": i.DataDir,
+		"io.dbforge.restart":  string(i.Restart),
+		"io.dbforge.desired":  string(i.Desired),
+		"io.dbforge.scope":    i.Scope,
+	}
+}
+
+// ShouldAutoStart reports whether the daemon should bring this instance back
+// on its own, given its policy and what the user last asked for.
+//
+// An instance the user stopped is never resurrected, whatever the policy says
+// -- that would make `dbctl stop` meaningless across a reboot.
+func (i Instance) ShouldAutoStart() bool {
+	if i.Desired != DesiredRunning {
+		return false
+	}
+	switch i.Restart {
+	case RestartAlways:
+		return true
+	case RestartOnFailure:
+		// Only if it did not exit cleanly. A clean exit with the user still
+		// wanting it running means something stopped it outside dbforge, and
+		// on-failure deliberately does not cover that.
+		return i.LastExitCode != 0
+	default:
+		return false
 	}
 }
 

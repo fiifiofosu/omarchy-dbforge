@@ -29,6 +29,9 @@ type Fake struct {
 	RemovePathErr error
 	// Pulled records images PullImage was asked for.
 	Pulled []string
+	// LastCreateSpec is the spec passed to the most recent Create, so tests
+	// can assert on what was actually asked of the runtime.
+	LastCreateSpec CreateSpec
 }
 
 func NewFake() *Fake {
@@ -79,6 +82,7 @@ func (f *Fake) PullImage(_ context.Context, image string) error {
 func (f *Fake) Create(_ context.Context, spec CreateSpec) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.LastCreateSpec = spec
 	if f.CreateErr != nil {
 		return "", f.CreateErr
 	}
@@ -144,4 +148,34 @@ func (f *Fake) Logs(_ context.Context, name string, _ bool, _ int, w io.Writer) 
 	}
 	_, err := io.Copy(w, strings.NewReader("log line from "+name+"\n"))
 	return err
+}
+
+// SetState changes a container's state under the fake's lock. Tests must use
+// this rather than touching Containers directly, or they race with any
+// goroutine driving the Runtime (supervision, for one).
+func (f *Fake) SetState(name string, state State, exitCode int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.Containers[name]; ok {
+		c.State = state
+		c.ExitCode = exitCode
+	}
+}
+
+// GetState reads a container's state under the fake's lock.
+func (f *Fake) GetState(name string) (State, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.Containers[name]
+	if !ok {
+		return "", false
+	}
+	return c.State, true
+}
+
+// CreateSpecFor returns the spec recorded by the most recent Create.
+func (f *Fake) CreateSpecFor() CreateSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.LastCreateSpec
 }

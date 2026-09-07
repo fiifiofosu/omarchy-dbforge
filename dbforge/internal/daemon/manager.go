@@ -29,6 +29,12 @@ import (
 // ManagedLabel marks a container as ours. Reconciliation keys off this.
 const ManagedLabel = "io.dbforge.managed"
 
+// ScopeLabel isolates one DBForge installation from another on the same host.
+const ScopeLabel = "io.dbforge.scope"
+
+// DefaultScope is used when none is configured.
+const DefaultScope = "default"
+
 // Errors surfaced to the CLI with distinct exit behaviour.
 var (
 	ErrInstanceExists   = errors.New("instance already exists")
@@ -42,6 +48,9 @@ type Config struct {
 	PortRange ports.Range
 	Probe     ports.Prober
 	Log       *slog.Logger
+	// Scope isolates this daemon's containers from any other DBForge on the
+	// same host. Empty means DefaultScope.
+	Scope string
 }
 
 // Manager is the single source of truth for instance state.
@@ -68,6 +77,9 @@ func NewManager(rt runtime.Runtime, st *store.Store, cfg Config) *Manager {
 	if cfg.PortRange == (ports.Range{}) {
 		cfg.PortRange = ports.DefaultRange
 	}
+	if cfg.Scope == "" {
+		cfg.Scope = DefaultScope
+	}
 	return &Manager{
 		rt: rt, st: st, cfg: cfg, log: cfg.Log,
 		clock:     time.Now,
@@ -93,6 +105,10 @@ type ReconcileReport struct {
 	Adopted []string // containers found in Podman but absent from config
 	Missing []string // config entries whose container has vanished
 	Pruned  []string // half-created entries with no container, cleaned up
+	// Unclean lists instances whose container exited nonzero. For engines
+	// like Postgres this means crash recovery runs on the next start, which
+	// is worth telling the user about rather than hiding (spec 7, phase 2).
+	Unclean []string
 }
 
 // Reconcile rebuilds state by treating Podman as ground truth and the TOML
@@ -121,6 +137,11 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	}
 	byName := make(map[string]runtime.Container, len(live))
 	for _, c := range live {
+		// Ignore containers belonging to another DBForge installation. An
+		// unlabelled container predates scoping, so treat it as ours.
+		if sc := c.Labels[ScopeLabel]; sc != "" && sc != m.cfg.Scope {
+			continue
+		}
 		byName[c.Name] = c
 	}
 
@@ -133,6 +154,18 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 		case found:
 			inst.ContainerID = c.ID
 			inst.Status = statusFrom(c)
+			if inst.Status != model.StatusRunning {
+				inst.LastExitCode = c.ExitCode
+				if c.ExitCode != 0 {
+					rep.Unclean = append(rep.Unclean, inst.ID)
+					m.log.Warn("instance exited uncleanly",
+						"id", inst.ID, "exit_code", c.ExitCode,
+						"hint", "the engine may run crash recovery on next start; see `dbctl logs "+inst.ID+"`")
+				}
+			} else {
+				inst.LastExitCode = 0
+			}
+			inst = withDefaults(inst)
 			next[inst.ID] = &inst
 			delete(byName, inst.ContainerName())
 		case inst.Status == model.StatusCreating:
@@ -145,6 +178,7 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 			// still exists and the user may want it back -- but surface drift.
 			inst.Status = model.StatusMissing
 			inst.ContainerID = ""
+			inst = withDefaults(inst)
 			next[inst.ID] = &inst
 			rep.Missing = append(rep.Missing, inst.ID)
 			m.log.Warn("instance container is missing", "id", inst.ID)
@@ -167,12 +201,13 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	sort.Strings(rep.Adopted)
 	sort.Strings(rep.Missing)
 	sort.Strings(rep.Pruned)
+	sort.Strings(rep.Unclean)
 
 	m.mu.Lock()
 	m.instances = next
 	m.mu.Unlock()
 
-	if len(rep.Adopted) > 0 || len(rep.Pruned) > 0 || len(rep.Missing) > 0 {
+	if len(rep.Adopted) > 0 || len(rep.Pruned) > 0 || len(rep.Missing) > 0 || len(rep.Unclean) > 0 {
 		// Reconciliation changed our view, so the index is stale. Force the
 		// write: we have just read the world, and our view is authoritative.
 		if err := m.save(true); err != nil {
@@ -180,6 +215,29 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// withDefaults fills in fields that a config written by an older DBForge will
+// not have. Without this, every pre-existing instance would read back with an
+// empty restart policy and an empty desired state, and so would never be
+// restored after a reboot.
+func withDefaults(i model.Instance) model.Instance {
+	if i.Scope == "" {
+		i.Scope = DefaultScope
+	}
+	if !model.ValidRestartPolicy(i.Restart) {
+		i.Restart = model.DefaultRestartPolicy
+	}
+	if i.Desired != model.DesiredRunning && i.Desired != model.DesiredStopped {
+		// Infer intent from what we can observe: a running container was
+		// clearly wanted running.
+		if i.Status == model.StatusRunning {
+			i.Desired = model.DesiredRunning
+		} else {
+			i.Desired = model.DesiredStopped
+		}
+	}
+	return i
 }
 
 func statusFrom(c runtime.Container) model.Status {
@@ -204,14 +262,17 @@ func instanceFromLabels(c runtime.Container) (model.Instance, error) {
 	if port == 0 {
 		port = c.HostPort
 	}
-	return model.Instance{
+	return withDefaults(model.Instance{
 		ID:          id,
 		Engine:      c.Labels["io.dbforge.engine"],
 		Version:     c.Labels["io.dbforge.version"],
 		DataDir:     c.Labels["io.dbforge.data_dir"],
 		Port:        port,
 		ContainerID: c.ID,
-	}, nil
+		Restart:     model.RestartPolicy(c.Labels["io.dbforge.restart"]),
+		Desired:     model.DesiredState(c.Labels["io.dbforge.desired"]),
+		Scope:       c.Labels[ScopeLabel],
+	}), nil
 }
 
 func (m *Manager) save(force bool) error {
@@ -281,6 +342,8 @@ type CreateOptions struct {
 	MemoryLimitBytes int64
 	NanoCPUs         int64
 	Start            bool
+	// Restart is the policy for automatic restarts. Empty means the default.
+	Restart model.RestartPolicy
 }
 
 // Create makes a new instance. It is deliberately ordered so that a crash at
@@ -295,6 +358,13 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 	}
 	if err := validateID(opt.ID); err != nil {
 		return model.Instance{}, err
+	}
+	if opt.Restart == "" {
+		opt.Restart = model.DefaultRestartPolicy
+	}
+	if !model.ValidRestartPolicy(opt.Restart) {
+		return model.Instance{}, fmt.Errorf(
+			"invalid restart policy %q (want one of: no, on-failure, always)", opt.Restart)
 	}
 
 	lock := m.lockFor(opt.ID)
@@ -349,6 +419,11 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 		ID: opt.ID, Engine: eng.Name, Version: version, Image: image,
 		Port: port, DataDir: dataDir, Env: eng.FirstRunEnv(password),
 		CreatedAt: m.clock().UTC(), Status: model.StatusCreating,
+		Scope:   m.cfg.Scope,
+		Restart: opt.Restart,
+		// The user asked for this instance; unless they said --no-start, they
+		// want it running, and that intent must outlive a reboot.
+		Desired: desiredFor(opt.Start),
 	}
 
 	// Record the intent before doing anything destructive or slow. If we die
@@ -375,6 +450,15 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 		HostDataDir: dataDir, ContainerDataDir: eng.DataPath,
 		MemoryLimitBytes: opt.MemoryLimitBytes, NanoCPUs: opt.NanoCPUs,
 		TZ: os.Getenv("TZ"),
+		// Deliberately "no", whatever the user's policy is.
+		//
+		// Podman's own restart policy is re-evaluated when the podman service
+		// restarts, and it has no idea whether the user deliberately stopped
+		// an instance -- so a container marked "always" comes back even after
+		// `dbctl stop`, silently undoing an explicit decision. Restart policy
+		// is the daemon's to enforce, because only the daemon knows desired
+		// state. Two controllers with different information is one too many.
+		RestartPolicy: "no",
 	}
 	cid, err := m.rt.Create(ctx, spec)
 	if err != nil {
@@ -428,6 +512,8 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 			return err
 		}
 		inst.Status = model.StatusRunning
+		inst.Desired = model.DesiredRunning
+		inst.LastExitCode = 0
 		return nil
 	})
 }
@@ -443,6 +529,9 @@ func (m *Manager) Stop(ctx context.Context, id string, timeoutSecs uint) error {
 			return err
 		}
 		inst.Status = model.StatusStopped
+		// An explicit stop is a durable decision: it must survive a reboot,
+		// so nothing auto-starts this instance again until the user says so.
+		inst.Desired = model.DesiredStopped
 		return nil
 	})
 }
@@ -554,6 +643,123 @@ func (m *Manager) ConnString(id string) (string, error) {
 func isRunningErr(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "is running") || strings.Contains(msg, "containers cannot be removed")
+}
+
+func desiredFor(start bool) model.DesiredState {
+	if start {
+		return model.DesiredRunning
+	}
+	return model.DesiredStopped
+}
+
+// RestoreReport says what Restore did.
+type RestoreReport struct {
+	Started []string
+	Failed  map[string]string
+	// Skipped lists instances that could have started but were deliberately
+	// left alone, with the reason.
+	Skipped map[string]string
+}
+
+// Restore brings back instances that should be running.
+//
+// This is what makes an instance survive a reboot. Rootless Podman does not
+// start containers at boot on its own (that needs podman-restart.service or a
+// generated unit per container), so the daemon does it from recorded intent
+// when the user's systemd session starts it.
+//
+// It only ever starts instances whose Desired state is running, so a database
+// the user stopped stays stopped across reboots.
+func (m *Manager) Restore(ctx context.Context) (RestoreReport, error) {
+	rep := RestoreReport{Failed: map[string]string{}, Skipped: map[string]string{}}
+
+	m.mu.Lock()
+	candidates := make([]model.Instance, 0, len(m.instances))
+	for _, i := range m.instances {
+		candidates = append(candidates, *i)
+	}
+	m.mu.Unlock()
+
+	sort.Slice(candidates, func(a, b int) bool { return candidates[a].ID < candidates[b].ID })
+
+	for _, inst := range candidates {
+		if inst.Status == model.StatusRunning {
+			continue
+		}
+		if inst.Status == model.StatusMissing {
+			rep.Skipped[inst.ID] = "container is missing"
+			continue
+		}
+		if !inst.ShouldAutoStart() {
+			rep.Skipped[inst.ID] = fmt.Sprintf("restart=%s desired=%s", inst.Restart, inst.Desired)
+			continue
+		}
+
+		if inst.LastExitCode != 0 {
+			m.log.Warn("restoring an instance that exited uncleanly",
+				"id", inst.ID, "exit_code", inst.LastExitCode,
+				"hint", "the engine may run crash recovery; see `dbctl logs "+inst.ID+"`")
+		}
+
+		if err := m.Start(ctx, inst.ID); err != nil {
+			rep.Failed[inst.ID] = err.Error()
+			m.log.Error("failed to restore instance", "id", inst.ID, "error", err)
+			continue
+		}
+		rep.Started = append(rep.Started, inst.ID)
+		m.log.Info("restored instance", "id", inst.ID, "restart", inst.Restart)
+	}
+	sort.Strings(rep.Started)
+	return rep, nil
+}
+
+// Supervise reconciles and restores on an interval until ctx is cancelled.
+//
+// Restoring only at startup would make "always" mean "always, as of the last
+// time the daemon started". This is what makes a crashed instance come back
+// while the host stays up -- the job podman's own restart policy would do, if
+// it could tell a crash from a deliberate stop.
+func (m *Manager) Supervise(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := m.Reconcile(ctx); err != nil {
+				m.log.Warn("supervision reconcile failed", "error", err)
+				continue
+			}
+			rep, err := m.Restore(ctx)
+			if err != nil {
+				m.log.Warn("supervision restore failed", "error", err)
+				continue
+			}
+			if len(rep.Started) > 0 {
+				m.log.Info("supervision restarted instances", "started", rep.Started)
+			}
+		}
+	}
+}
+
+// SetRestartPolicy changes an instance's policy.
+//
+// The policy lives entirely in DBForge's own state; container-level restart
+// policy is always "no". So this takes effect immediately, with no need to
+// recreate the container.
+func (m *Manager) SetRestartPolicy(ctx context.Context, id string, p model.RestartPolicy) error {
+	if !model.ValidRestartPolicy(p) {
+		return fmt.Errorf("invalid restart policy %q (want one of: no, on-failure, always)", p)
+	}
+	return m.transition(ctx, id, func(inst *model.Instance) error {
+		inst.Restart = p
+		return nil
+	})
 }
 
 func validateID(id string) error {

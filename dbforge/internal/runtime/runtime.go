@@ -54,6 +54,12 @@ type CreateSpec struct {
 	NanoCPUs         int64
 	// TZ is passed through so container log timestamps match the host (spec 8).
 	TZ string
+	// RestartPolicy is podman's own policy ("no", "on-failure", "always").
+	// It covers the container dying while the host stays up; bringing
+	// instances back after a reboot is the daemon's job, since rootless
+	// containers are not started by podman on boot unless podman-restart is
+	// enabled (spec 7, phase 2).
+	RestartPolicy string
 }
 
 // Runtime is the container engine DBForge drives.

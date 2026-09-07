@@ -9,8 +9,8 @@ package model fights), every instance is a rootless Podman container with its
 own port and its own data directory. Creating a Postgres 16 alongside a
 Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 
-> **Status: Phase 1 complete.** The daemon, CLI, port allocation, data-directory
-> management, config persistence and drift reconciliation are implemented, unit
+> **Status: Phase 2 complete.** Lifecycle, port allocation, persistence, drift
+> reconciliation, restart policies and reboot recovery are implemented, unit
 > tested, and verified end to end against real rootless Podman containers. The
 > TUI (Phase 3) and waybar widget (Phase 4) are not built yet.
 > See [Roadmap](#roadmap).
@@ -126,6 +126,8 @@ dbctl stop <id>
 dbctl rm <id> [--wipe-data] [--force] [--yes]
 dbctl logs <id> [--follow] [--tail N]
 dbctl conn <id>
+dbctl restart-policy <id> <no|on-failure|always>
+dbctl restore
 dbctl engines
 ```
 
@@ -143,7 +145,57 @@ will consume. It always emits a JSON array, never `null`, so consumers can tell
 
 **`logs --follow`** streams until you interrupt it.
 
+**`restart-policy`** changes whether an instance comes back automatically. It
+takes effect immediately -- no need to recreate the container.
+
+**`restore`** starts everything that should be running. The daemon does this
+itself on startup and on an interval; the command exists so the reboot path is
+testable by hand.
+
 ---
+
+## Restart behaviour
+
+Instances come back after a reboot. Two separate things decide whether:
+
+| Restart policy | Meaning |
+|---|---|
+| `always` (default) | Comes back whenever it should be running -- crash, daemon restart, or reboot |
+| `on-failure` | Comes back only after an unclean exit, not after a clean one |
+| `no` | Only ever started explicitly |
+
+The policy is one half. The other is **desired state**: what you last asked
+for. An instance you stopped with `dbctl stop` stays stopped across a reboot
+*whatever its policy says*, because otherwise `dbctl stop` would not mean
+anything the next morning. Only an explicit `start` or `stop` changes it.
+
+The daemon re-checks on an interval (30s by default,
+`DBFORGE_SUPERVISE_INTERVAL`), so a crashed instance with `always` comes back
+while the host stays up, not just at the next login.
+
+### Why the container's own restart policy is always "no"
+
+Podman has its own restart policy, and DBForge deliberately does not use it.
+Podman re-evaluates that policy when the podman service restarts, and it has no
+idea whether you stopped an instance on purpose -- so a container marked
+`always` comes back after `dbctl stop` and silently undoes your decision. This
+was observed, not theorised: a stopped instance restarted itself when
+`podman.socket` was bounced.
+
+Restart policy is the daemon's to enforce, because only the daemon knows
+desired state. Two controllers with different information is one too many.
+
+### Lingering
+
+For instances to survive **logout** and come back at **boot**, the systemd user
+manager has to keep running when you are not logged in:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+Without it, your databases stop at logout and stay down until you next log in.
+`packaging/install.sh` checks this and tells you if it is missing.
 
 ## How it works
 
@@ -209,6 +261,9 @@ uninstalling DBForge never deletes a database.
 | `DBFORGE_PODMAN_SOCKET` | Override the Podman socket |
 | `DBFORGE_DATA_ROOT` | Override where instance data is stored |
 | `DBFORGE_LOG_LEVEL` | `debug`, `info`, `warn`, `error` |
+| `DBFORGE_SUPERVISE_INTERVAL` | How often to re-check instances (default `30s`) |
+| `DBFORGE_NO_RESTORE` | Set to skip restoring instances on daemon startup |
+| `DBFORGE_SCOPE` | Isolate this installation's containers from another on the same host |
 
 ---
 
@@ -323,6 +378,15 @@ The practical consequence: `ls ~/.local/share/dbforge/postgres/16/my-db` will
 give you "Permission denied". That is expected. Use `dbctl rm <id> --wipe-data`
 rather than deleting directories by hand.
 
+### Scopes
+
+Containers are found by label, so two DBForge daemons on one host would adopt
+each other's instances. Each installation has a **scope** (`default` unless
+`DBFORGE_SCOPE` says otherwise) stamped onto every container, and a daemon
+ignores containers belonging to another scope. This is what lets the
+integration tests run against real Podman without disturbing -- or being
+disturbed by -- the instances you actually use.
+
 ### Testing approach
 
 Everything above `runtime.Runtime` is tested against an in-memory fake, so the
@@ -340,9 +404,19 @@ go test -tags integration -timeout 20m ./test/integration/
 
 They cover the Postgres and Redis lifecycles, two instances of one engine side
 by side, data surviving stop/start, wiping a subuid-owned data directory, drift
-after an external `podman rm`, and a nonexistent tag failing fast. Roughly 50
-seconds once images are cached; they skip rather than fail when Podman is
-absent.
+after an external `podman rm`, a nonexistent tag failing fast, restoration
+after a daemon restart, restart policies, and the daemon surviving a
+`podman.socket` restart. Roughly 60 seconds once images are cached; they skip
+rather than fail when Podman is absent.
+
+Suspend/resume cannot be automated. `packaging/verify-suspend.sh` does it in
+two halves, around a real lid close:
+
+```bash
+./packaging/verify-suspend.sh before
+# suspend, resume
+./packaging/verify-suspend.sh after
+```
 
 ---
 
@@ -359,6 +433,13 @@ enabled:
 ```bash
 systemctl --user enable --now podman.socket
 ```
+
+**An instance shows `exited(137)`** — it was killed rather than stopped
+cleanly (usually OOM). With `restart=always` the daemon brings it back within
+the supervision interval. For Postgres, expect crash recovery in `dbctl logs`.
+
+**Databases stop when I log out** — user lingering is off:
+`sudo loginctl enable-linger $USER`.
 
 **An instance shows `missing(!)`** — its container was removed outside DBForge.
 Your data is untouched. `dbctl rm <id>` forgets the entry; recreating with the
@@ -379,13 +460,15 @@ means something really is listening. `ss -tlnp | grep <port>` will say what.
 |---|---|---|
 | 0 | Feasibility spike on Omarchy | ✅ done |
 | 1 | Daemon + CLI, lifecycle, ports, persistence, reconciliation | ✅ done, incl. integration tests |
-| 2 | systemd unit, restart safety, suspend/resume | 🚧 unit shipped; restart policy and suspend/resume pending |
+| 2 | systemd unit, restart safety, restart policies, reboot recovery | ✅ done; suspend/resume needs a manual run |
 | 3 | Bubble Tea TUI | ⬜ not started |
 | 4 | waybar module, then Quickshell | ⬜ not started |
 | 5 | AUR packaging | ⬜ not started |
 | 6 | `dbctl doctor`, structured logging | ⬜ partial (logging done) |
 
 Full plan: [`docs/dbforge-omarchy-implementation-plan.md`](docs/dbforge-omarchy-implementation-plan.md).
+Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),
+[`docs/phase-2-notes.md`](docs/phase-2-notes.md).
 
 ---
 
