@@ -17,7 +17,7 @@ type Range struct {
 }
 
 // DefaultRange is used when an engine has no opinion.
-var DefaultRange = Range{Low: 15432, High: 15999}
+var DefaultRange = Range{Low: 15000, High: 15999}
 
 // Prober reports whether a port can be bound. It exists so tests can simulate
 // contention without racing on real sockets.

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -275,3 +277,35 @@ func isNotFound(err error) bool {
 
 func boolPtr(b bool) *bool    { return &b }
 func strPtr(s string) *string { return &s }
+
+// RemovePath deletes a host path from inside the rootless user namespace.
+//
+// This is the one place DBForge shells out rather than using the bindings.
+// `podman unshare` re-executes a command inside the same UID mapping the
+// containers use, which is the only way to unlink files a container created
+// as a non-root user: on the host those are owned by a subuid (uid 999 in the
+// container becomes 100998 here) that we have no permission to touch.
+//
+// The bindings expose no equivalent, because the operation is fundamentally
+// about re-executing a process in a namespace rather than an API call.
+func (p *Podman) RemovePath(ctx context.Context, path string) error {
+	if !filepath.IsAbs(path) || path == "/" {
+		return fmt.Errorf("refusing to remove non-absolute or root path %q", path)
+	}
+
+	// Fast path: if it is already ours, no namespace juggling needed.
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "podman", "unshare", "rm", "-rf", "--", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("removing %s via podman unshare: %w: %s",
+			path, err, strings.TrimSpace(string(out)))
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		return fmt.Errorf("path %s still exists after removal", path)
+	}
+	return nil
+}

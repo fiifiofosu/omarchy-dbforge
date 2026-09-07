@@ -374,3 +374,45 @@ func TestConnStringIncludesGeneratedPassword(t *testing.T) {
 		t.Fatalf("conn string %q lacks the generated password", got)
 	}
 }
+
+func TestWipeDelegatesToRuntimeNotOsRemoveAll(t *testing.T) {
+	// Under rootless Podman the data directory is owned by a subuid, so a
+	// direct os.RemoveAll fails with EPERM. The wipe must go through the
+	// runtime, which can re-enter the user namespace. This test pins the
+	// delegation so the call cannot regress back to os.RemoveAll.
+	m, fake := newTestManager(t)
+	inst := mustCreate(t, m, "postgres:16", "wipe-deleg")
+
+	fake.RemovePathErr = errors.New("simulated userns failure")
+	err := m.Remove(context.Background(), "wipe-deleg", RemoveOptions{WipeData: true})
+	if err == nil || !strings.Contains(err.Error(), "simulated userns failure") {
+		t.Fatalf("got %v; wipe did not go through Runtime.RemovePath", err)
+	}
+	// The instance must survive a failed wipe rather than being forgotten
+	// while its data is still on disk.
+	if _, err := m.Get("wipe-deleg"); err != nil {
+		t.Fatal("instance was dropped even though its data could not be removed")
+	}
+	if _, err := os.Stat(inst.DataDir); err != nil {
+		t.Fatal("data directory vanished despite the removal failing")
+	}
+}
+
+func TestRemoveRunningGivesActionableError(t *testing.T) {
+	// Podman's own message talks about "container state improper", which tells
+	// the user nothing. We must name the two ways out.
+	m, fake := newTestManager(t)
+	mustCreate(t, m, "redis:7", "busy")
+	fake.RemoveErr = errors.New("cannot remove container abc123 as it is running - " +
+		"running or paused containers cannot be removed without force: container state improper")
+
+	err := m.Remove(context.Background(), "busy", RemoveOptions{})
+	if err == nil {
+		t.Fatal("expected an error removing a running instance")
+	}
+	for _, want := range []string{"dbctl stop busy", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}

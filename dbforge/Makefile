@@ -2,13 +2,17 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 PREFIX  ?= $(HOME)/.local
 
-.PHONY: build test vet lint install uninstall clean
+.PHONY: build test test-integration vet lint install uninstall clean
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o dist/dbforge ./cmd/dbforge
 
 test:
 	go test ./...
+
+# Needs a working rootless Podman; pulls real images.
+test-integration:
+	go test -tags integration -timeout 20m ./test/integration/
 
 vet:
 	go vet ./...

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 )
@@ -20,6 +21,12 @@ type Fake struct {
 	// CreateErr, if set, is returned by Create -- used to simulate a disk-full
 	// or subuid-exhaustion failure partway through a create.
 	CreateErr error
+	// RemoveErr, if set, is returned by Remove -- used to simulate podman
+	// refusing to remove a running container.
+	RemoveErr error
+	// RemovePathErr, if set, is returned by RemovePath -- used to simulate a
+	// failure to delete a subuid-owned data directory.
+	RemovePathErr error
 	// Pulled records images PullImage was asked for.
 	Pulled []string
 }
@@ -111,11 +118,22 @@ func (f *Fake) Stop(_ context.Context, name string, _ uint) error {
 func (f *Fake) Remove(_ context.Context, name string, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.RemoveErr != nil {
+		return f.RemoveErr
+	}
 	if _, ok := f.Containers[name]; !ok {
 		return ErrNotFound
 	}
 	delete(f.Containers, name)
 	return nil
+}
+
+// RemovePath in the fake is a plain delete: tests run without a user namespace.
+func (f *Fake) RemovePath(_ context.Context, path string) error {
+	if f.RemovePathErr != nil {
+		return f.RemovePathErr
+	}
+	return os.RemoveAll(path)
 }
 
 func (f *Fake) Logs(_ context.Context, name string, _ bool, _ int, w io.Writer) error {

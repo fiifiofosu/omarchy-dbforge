@@ -64,12 +64,65 @@ here.
 3. **waybar-first is confirmed correct.** Omarchy 3.8.4 is waybar-era; the
    Quickshell 4.0 path is additive, as §10 recommended.
 
-## Not yet verified
+## Spike results (verified against Podman 6.0.1)
 
-Podman was not installable at spike time: the Omarchy stable mirror 404s on the
-versions in the local pacman DB, which was ~7 weeks stale. These remain open:
+Rootless Podman confirmed working: `runc`, native `overlay` storage (not
+fuse-overlayfs), `netavark`, cgroups v2 with the systemd manager. UID mapping
+is `container 0 -> host 1000`, then `container 1..65536 -> host 100000+`.
 
-- Postgres and Redis running side by side, both reachable from the host.
-- Data surviving `podman stop` / `podman start`.
-- Bind-mount ownership under rootless UID mapping.
-- Suspend/resume behaviour (laptop lid close) — plan §7 phase 2.
+| Question | Result |
+|---|---|
+| Postgres 16 and Redis 7 side by side | Both run concurrently, distinct ports and data directories |
+| Reachable from the host with ufw active | Yes, both, over loopback |
+| Data survives stop/start | Yes, verified by writing through the published port and reading back after a restart |
+| Bind-mount ownership under rootless | **Trap found** -- see below |
+| Nonexistent tag fails fast | Yes, ~1.8s, before any container or data directory is created |
+
+### The bind-mount ownership trap
+
+A container process running as a non-root user leaves files on the host owned
+by a *subordinate* UID. Postgres runs as container uid 999, which lands as host
+uid 100998 -- not 1000. The host user cannot read, traverse or unlink those
+files:
+
+```
+$ stat -c %u ~/.local/share/dbforge/postgres/16/app-db
+100998
+$ rm -rf ~/.local/share/dbforge/postgres/16/app-db
+rm: cannot remove '...': Permission denied
+```
+
+This broke `--wipe-data`, which used `os.RemoveAll`. Deletion has to happen
+inside the user namespace instead, via `podman unshare rm -rf`. That is now
+`Runtime.RemovePath`, and it is the one place DBForge shells out rather than
+using the bindings -- `unshare` re-executes a process in a namespace, which is
+not something the API can express.
+
+### The Postgres PGDATA trap
+
+The original design put `PGDATA` in a `pgdata/` subdirectory of the bind mount,
+on the theory that Postgres refuses to `initdb` into a non-empty directory.
+That fails under rootless Podman:
+
+```
+mkdir: cannot create directory '/var/lib/postgresql/data': Permission denied
+```
+
+The image's `docker_create_db_directories` runs as root, creates `$PGDATA` and
+chowns **`$PGDATA` and its contents** to the `postgres` user -- but not the
+parent. It then re-execs as `postgres` and runs the same function again. With
+`PGDATA` in a subdirectory, the mount itself stays `root:root 0700`, so the
+`postgres` user cannot traverse into it; `mkdir -p` fails to stat the parent,
+assumes it is missing, and reports that path.
+
+Mounting directly at the image's default `PGDATA` lets the chown land on the
+mount itself. The non-empty-directory concern does not apply, because DBForge
+always creates a fresh dedicated directory rather than mounting a filesystem
+root.
+
+### Still open
+
+- Suspend/resume across a laptop lid close (plan 7, phase 2). Needs a real
+  suspend cycle; not exercised here.
+- Behaviour on a genuinely full disk. The rollback path is unit-tested with a
+  simulated failure, but not against real ENOSPC.

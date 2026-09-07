@@ -9,9 +9,10 @@ package model fights), every instance is a rootless Podman container with its
 own port and its own data directory. Creating a Postgres 16 alongside a
 Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 
-> **Status: Phase 1.** The daemon, the CLI, port allocation, data-directory
-> management, config persistence and drift reconciliation are implemented and
-> tested. The TUI (Phase 3) and waybar widget (Phase 4) are not built yet.
+> **Status: Phase 1 complete.** The daemon, CLI, port allocation, data-directory
+> management, config persistence and drift reconciliation are implemented, unit
+> tested, and verified end to end against real rootless Podman containers. The
+> TUI (Phase 3) and waybar widget (Phase 4) are not built yet.
 > See [Roadmap](#roadmap).
 
 ---
@@ -236,8 +237,10 @@ Docker means writing one file.
 
 Rootless containers *can* bind 5432 (`ip_unprivileged_port_start` is 1024 on
 Arch), but defaulting there would collide with a natively installed engine. So
-the default range is high and out of the way, and `--port 5432` is available
-when you want the conventional one.
+the default range is 15000-15999, and each engine starts its search at a port
+whose digits echo the conventional one (15432 for Postgres, 15306 for MySQL) so
+an instance's port stays guessable without ever occupying the real one.
+`--port 5432` is there when you do want the conventional one.
 
 Crucially, a port is only considered free once it has actually been **bound**.
 "Not in our config" is not the same as "available" — another dev tool or a
@@ -307,6 +310,19 @@ internal/cli/       dbctl
 packaging/          systemd user unit
 ```
 
+### Data directories are owned by a subordinate UID
+
+Under rootless Podman a container process running as a non-root user leaves
+files owned by a *subuid* on the host: Postgres runs as container uid 999,
+which appears as host uid 100998, not your 1000. You cannot `rm -rf` those
+directories yourself, and neither can DBForge directly -- wiping goes through
+`podman unshare`. This is why `Runtime.RemovePath` exists rather than a plain
+`os.RemoveAll`.
+
+The practical consequence: `ls ~/.local/share/dbforge/postgres/16/my-db` will
+give you "Permission denied". That is expected. Use `dbctl rm <id> --wipe-data`
+rather than deleting directories by hand.
+
 ### Testing approach
 
 Everything above `runtime.Runtime` is tested against an in-memory fake, so the
@@ -315,7 +331,18 @@ Tests cover the cases where silent data loss hides: port double-assignment,
 reconciliation, rollback on partial create, concurrent mutation of one
 instance, and the keep-data-by-default guarantee.
 
-Integration tests against real containers are Phase 1's remaining work.
+Integration tests run against real rootless Podman, behind a build tag so the
+default `go test` stays fast and dependency-free:
+
+```bash
+go test -tags integration -timeout 20m ./test/integration/
+```
+
+They cover the Postgres and Redis lifecycles, two instances of one engine side
+by side, data surviving stop/start, wiping a subuid-owned data directory, drift
+after an external `podman rm`, and a nonexistent tag failing fast. Roughly 50
+seconds once images are cached; they skip rather than fail when Podman is
+absent.
 
 ---
 
@@ -351,8 +378,8 @@ means something really is listening. `ss -tlnp | grep <port>` will say what.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Feasibility spike on Omarchy | ✅ done |
-| 1 | Daemon + CLI, lifecycle, ports, persistence, reconciliation | ✅ implemented; integration tests pending |
-| 2 | systemd unit, restart safety, suspend/resume | 🚧 unit shipped, restart policy pending |
+| 1 | Daemon + CLI, lifecycle, ports, persistence, reconciliation | ✅ done, incl. integration tests |
+| 2 | systemd unit, restart safety, suspend/resume | 🚧 unit shipped; restart policy and suspend/resume pending |
 | 3 | Bubble Tea TUI | ⬜ not started |
 | 4 | waybar module, then Quickshell | ⬜ not started |
 | 5 | AUR packaging | ⬜ not started |

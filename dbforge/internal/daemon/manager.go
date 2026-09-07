@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -489,6 +490,13 @@ func (m *Manager) Remove(ctx context.Context, id string, opt RemoveOptions) erro
 
 	err := m.rt.Remove(ctx, inst.ContainerName(), opt.Force)
 	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		// Podman refuses to remove a running container, and says so in terms
+		// of container state. Translate that into the two things the user can
+		// actually do about it.
+		if isRunningErr(err) {
+			return fmt.Errorf("%s is still running: stop it first with `dbctl stop %s`, "+
+				"or pass --force to remove it while running", id, id)
+		}
 		return fmt.Errorf("removing container: %w", err)
 	}
 
@@ -498,7 +506,9 @@ func (m *Manager) Remove(ctx context.Context, id string, opt RemoveOptions) erro
 		if inst.DataDir == "" || !filepath.IsAbs(inst.DataDir) {
 			return fmt.Errorf("refusing to wipe suspicious data dir %q", inst.DataDir)
 		}
-		if err := os.RemoveAll(inst.DataDir); err != nil {
+		// Delegated to the runtime, not os.RemoveAll: under rootless Podman
+		// the engine's files are owned by a subuid we cannot unlink directly.
+		if err := m.rt.RemovePath(ctx, inst.DataDir); err != nil {
 			return fmt.Errorf("removing data directory: %w", err)
 		}
 		m.log.Warn("wiped instance data", "id", id, "dir", inst.DataDir)
@@ -537,6 +547,13 @@ func (m *Manager) ConnString(id string) (string, error) {
 		}
 	}
 	return eng.ConnString(inst.Port, pw), nil
+}
+
+// isRunningErr reports whether a removal failed only because the container is
+// still running.
+func isRunningErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "is running") || strings.Contains(msg, "containers cannot be removed")
 }
 
 func validateID(id string) error {

@@ -22,8 +22,10 @@ type Engine struct {
 	// is the bind-mount target.
 	DataPath string
 	// DefaultPortBase is where port allocation starts searching for this
-	// engine, chosen to sit just above the engine's conventional port so a
-	// natively-installed engine on the standard port is never displaced.
+	// engine. It must lie inside ports.DefaultRange or the allocator falls
+	// back to the bottom of the range and the value has no effect. The digits
+	// echo the engine's conventional port (15432 for Postgres's 5432) so an
+	// instance's port is guessable, without ever occupying the real one.
 	DefaultPortBase int
 
 	// FirstRunEnv returns the environment needed to initialise a *brand new*
@@ -46,16 +48,16 @@ var catalogue = map[string]Engine{
 		Image:           "docker.io/library/postgres",
 		ContainerPort:   5432,
 		DataPath:        "/var/lib/postgresql/data",
-		DefaultPortBase: 5433,
+		DefaultPortBase: 15432,
 		NeedsPassword:   true,
 		FirstRunEnv: func(pw string) map[string]string {
-			return map[string]string{
-				"POSTGRES_PASSWORD": pw,
-				// Keep the data in a subdirectory of the mount. Postgres
-				// refuses to initdb into a directory that already contains
-				// anything (lost+found on some filesystems is enough).
-				"PGDATA": "/var/lib/postgresql/data/pgdata",
-			}
+			// Deliberately no custom PGDATA. The entrypoint chowns $PGDATA to
+			// the postgres user but not its parent, so pointing PGDATA at a
+			// subdirectory of the mount leaves the mount itself root-owned and
+			// mode 0700 -- and the postgres user then cannot traverse into it.
+			// Mounting directly at the default PGDATA lets the chown land on
+			// the mount itself. Verified against postgres:16.
+			return map[string]string{"POSTGRES_PASSWORD": pw}
 		},
 		ConnString: func(port int, pw string) string {
 			return fmt.Sprintf("postgresql://postgres:%s@127.0.0.1:%d/postgres", pw, port)
@@ -66,7 +68,7 @@ var catalogue = map[string]Engine{
 		Image:           "docker.io/library/mysql",
 		ContainerPort:   3306,
 		DataPath:        "/var/lib/mysql",
-		DefaultPortBase: 3307,
+		DefaultPortBase: 15306,
 		NeedsPassword:   true,
 		FirstRunEnv: func(pw string) map[string]string {
 			return map[string]string{"MYSQL_ROOT_PASSWORD": pw}
@@ -80,7 +82,7 @@ var catalogue = map[string]Engine{
 		Image:           "docker.io/library/mariadb",
 		ContainerPort:   3306,
 		DataPath:        "/var/lib/mysql",
-		DefaultPortBase: 3317,
+		DefaultPortBase: 15316,
 		NeedsPassword:   true,
 		FirstRunEnv: func(pw string) map[string]string {
 			return map[string]string{"MARIADB_ROOT_PASSWORD": pw}
@@ -94,7 +96,7 @@ var catalogue = map[string]Engine{
 		Image:           "docker.io/library/redis",
 		ContainerPort:   6379,
 		DataPath:        "/data",
-		DefaultPortBase: 6380,
+		DefaultPortBase: 15379,
 		NeedsPassword:   false,
 		FirstRunEnv:     func(string) map[string]string { return map[string]string{} },
 		ConnString: func(port int, _ string) string {

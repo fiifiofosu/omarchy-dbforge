@@ -51,9 +51,9 @@ func Run(ctx context.Context, args []string) int {
 	case "list", "ls":
 		err = cmdList(ctx, c, rest)
 	case "start":
-		err = cmdSimple(ctx, rest, "start", c.Start)
+		err = cmdSimple(ctx, rest, "start", "started", c.Start)
 	case "stop":
-		err = cmdSimple(ctx, rest, "stop", c.Stop)
+		err = cmdSimple(ctx, rest, "stop", "stopped", c.Stop)
 	case "rm", "remove", "destroy":
 		err = cmdRemove(ctx, c, rest)
 	case "logs":
@@ -75,20 +75,39 @@ func Run(ctx context.Context, args []string) int {
 	return 0
 }
 
+// splitLeadingPositional pulls a leading non-flag argument off the front of
+// args.
+//
+// Go's flag package stops parsing at the first positional argument, so
+// `dbctl rm app-db --wipe-data` would parse zero flags and silently ignore
+// --wipe-data. Every subcommand that takes both a positional and flags must
+// go through this, or flags become order-dependent in a way nobody expects.
+func splitLeadingPositional(args []string) (positional string, rest []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
+}
+
 func cmdCreate(ctx context.Context, c *Client, args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	name := fs.String("name", "", "instance id (default: engine+version)")
 	port := fs.Int("port", 0, "pin a host port (default: auto-allocate)")
 	noStart := fs.Bool("no-start", false, "create without starting")
+
+	ref, args := splitLeadingPositional(args)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if ref == "" {
+		ref = fs.Arg(0)
+	}
+	if ref == "" {
 		return fmt.Errorf("usage: dbctl create <engine:version> [--name ID]")
 	}
 
 	inst, err := c.Create(ctx, daemon.CreateOptions{
-		Ref: fs.Arg(0), ID: *name, Port: *port, Start: !*noStart,
+		Ref: ref, ID: *name, Port: *port, Start: !*noStart,
 	})
 	if err != nil {
 		return err
@@ -167,14 +186,14 @@ func age(t time.Time) string {
 	}
 }
 
-func cmdSimple(ctx context.Context, args []string, verb string, fn func(context.Context, string) error) error {
+func cmdSimple(ctx context.Context, args []string, verb, pastTense string, fn func(context.Context, string) error) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: dbctl %s <id>", verb)
 	}
 	if err := fn(ctx, args[0]); err != nil {
 		return err
 	}
-	fmt.Printf("%s: %sped\n", args[0], verb)
+	fmt.Printf("%s: %s\n", args[0], pastTense)
 	return nil
 }
 
@@ -186,13 +205,17 @@ func cmdRemove(ctx context.Context, c *Client, args []string) error {
 	wipe := fs.Bool("wipe-data", false, "ALSO delete the data directory (irreversible)")
 	force := fs.Bool("force", false, "remove even if running")
 	yes := fs.Bool("yes", false, "skip confirmation (scripts only)")
+
+	id, args := splitLeadingPositional(args)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if id == "" {
+		id = fs.Arg(0)
+	}
+	if id == "" {
 		return fmt.Errorf("usage: dbctl rm <id> [--wipe-data]")
 	}
-	id := fs.Arg(0)
 
 	if *wipe && !*yes {
 		fmt.Printf("This will PERMANENTLY DELETE all data for %q.\n", id)
@@ -218,13 +241,18 @@ func cmdLogs(ctx context.Context, c *Client, args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	follow := fs.Bool("follow", false, "stream new output")
 	tail := fs.Int("tail", 200, "lines of history")
+
+	id, args := splitLeadingPositional(args)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if id == "" {
+		id = fs.Arg(0)
+	}
+	if id == "" {
 		return fmt.Errorf("usage: dbctl logs <id> [--follow]")
 	}
-	return c.Logs(ctx, fs.Arg(0), *follow, *tail, os.Stdout)
+	return c.Logs(ctx, id, *follow, *tail, os.Stdout)
 }
 
 func cmdConn(ctx context.Context, c *Client, args []string) error {

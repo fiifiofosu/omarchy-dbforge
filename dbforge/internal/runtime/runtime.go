@@ -76,4 +76,13 @@ type Runtime interface {
 	// Logs streams container logs to w. If follow is set it blocks until ctx
 	// is cancelled.
 	Logs(ctx context.Context, name string, follow bool, tail int, w io.Writer) error
+
+	// RemovePath deletes a host path that may be owned by a subordinate UID.
+	//
+	// Under rootless Podman a container process running as a non-root user
+	// (postgres runs as uid 999) has its files land on the host owned by a
+	// subuid -- 100998, not our 1000. We cannot unlink those directly, so a
+	// plain os.RemoveAll fails with EPERM. This must run inside the user
+	// namespace instead.
+	RemovePath(ctx context.Context, path string) error
 }
