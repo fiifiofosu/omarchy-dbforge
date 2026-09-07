@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/fiifiofosu/dbforge/internal/daemon"
 	"github.com/fiifiofosu/dbforge/internal/model"
+	"github.com/fiifiofosu/dbforge/internal/runtime"
 )
 
 // Client speaks HTTP over the daemon's Unix socket.
@@ -109,6 +111,44 @@ func (c *Client) Create(ctx context.Context, opt daemon.CreateOptions) (model.In
 	defer resp.Body.Close()
 	var out model.Instance
 	return out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
+// CreateStream creates an instance, reporting image-pull progress as it goes.
+//
+// Create blocks with nothing to show for however long a first pull takes,
+// which on a slow link is minutes of apparent hang. This reports each phase as
+// the daemon reaches it, so the caller can say what is happening.
+//
+// The response is 200 as soon as the work starts, so failures arrive in the
+// stream rather than the status line -- see the server side for why.
+func (c *Client) CreateStream(ctx context.Context, opt daemon.CreateOptions, onProgress func(runtime.PullEvent)) (model.Instance, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/instances?stream=true", opt)
+	if err != nil {
+		return model.Instance{}, err
+	}
+	defer resp.Body.Close()
+
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev daemon.CreateEvent
+		if err := dec.Decode(&ev); err != nil {
+			if errors.Is(err, io.EOF) {
+				// The daemon closed without a verdict: it died, or was
+				// restarted mid-pull. Saying so beats returning a zero
+				// instance and no error.
+				return model.Instance{}, errors.New("daemon closed the connection before the instance was created")
+			}
+			return model.Instance{}, err
+		}
+		switch {
+		case ev.Error != "":
+			return model.Instance{}, errors.New(ev.Error)
+		case ev.Instance != nil:
+			return *ev.Instance, nil
+		case ev.Progress != nil && onProgress != nil:
+			onProgress(*ev.Progress)
+		}
+	}
 }
 
 func (c *Client) Start(ctx context.Context, id string) error {

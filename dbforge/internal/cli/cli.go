@@ -15,6 +15,7 @@ import (
 	"github.com/fiifiofosu/dbforge/internal/daemon"
 	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
+	"github.com/fiifiofosu/dbforge/internal/runtime"
 )
 
 const usage = `dbctl - manage local database instances
@@ -133,10 +134,25 @@ func cmdCreate(ctx context.Context, c *Client, args []string) error {
 		return fmt.Errorf("usage: dbctl create <engine:version> [--name ID]")
 	}
 
-	inst, err := c.Create(ctx, daemon.CreateOptions{
+	// Progress goes to stderr so `dbctl create ... > file` still captures only
+	// the result, and so a pipeline is not fed a spinner.
+	lastPhase := ""
+	onProgress := func(ev runtime.PullEvent) {
+		line := ev.Message
+		if ev.Layer > 0 {
+			line = fmt.Sprintf("%s (layer %d)", line, ev.Layer)
+		}
+		if line == lastPhase {
+			return // podman repeats a phase per layer; say it once
+		}
+		lastPhase = line
+		fmt.Fprintf(os.Stderr, "  %s\n", line)
+	}
+
+	inst, err := c.CreateStream(ctx, daemon.CreateOptions{
 		Ref: ref, ID: *name, Port: *port, Start: !*noStart,
 		Restart: model.RestartPolicy(*restart),
-	})
+	}, onProgress)
 	if err != nil {
 		return err
 	}

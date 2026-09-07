@@ -12,6 +12,7 @@ import (
 	"github.com/fiifiofosu/dbforge/internal/daemon"
 	"github.com/fiifiofosu/dbforge/internal/model"
 	"github.com/fiifiofosu/dbforge/internal/registry"
+	"github.com/fiifiofosu/dbforge/internal/runtime"
 )
 
 // createStep is the position in the guided form: engine, then version, then
@@ -42,6 +43,14 @@ type createModel struct {
 
 	name string
 	port string
+
+	// Progress of the image pull, so the submitting step can say what is
+	// happening instead of asking the user to trust that it is.
+	pullCh      chan tea.Msg
+	pullPhase   string
+	pullLayers  int
+	pullStarted time.Time
+	spinFrame   int
 
 	restarts     []model.RestartPolicy
 	restartIndex int
@@ -92,7 +101,38 @@ type createdMsg struct {
 	err  error
 }
 
-func (m Model) submitCreate() tea.Cmd {
+// pullMsg is one progress report from the daemon during a create.
+type pullMsg struct{ ev runtime.PullEvent }
+
+// spinMsg advances the spinner and the elapsed clock while a create is in
+// flight. Progress lines can be many seconds apart -- a single layer of a
+// database image is a long download -- so something has to keep moving in
+// between, or the interface looks hung precisely when it is busiest.
+type spinMsg time.Time
+
+const spinInterval = 120 * time.Millisecond
+
+// spinFrames is deliberately plain ASCII: this runs in whatever terminal the
+// user has, and a box-drawing spinner that renders as tofu is worse than none.
+var spinFrames = []string{"|", "/", "-", "\\"}
+
+func spinTick() tea.Cmd {
+	return tea.Tick(spinInterval, func(t time.Time) tea.Msg { return spinMsg(t) })
+}
+
+// waitForPull blocks on the progress channel inside a command, so the Bubble
+// Tea event loop is never blocked. Mirrors the log tail's approach.
+func waitForPull(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func (m Model) submitCreate(ch chan tea.Msg) tea.Cmd {
 	c := m.client
 	opt := daemon.CreateOptions{
 		Ref:     m.create.engine() + ":" + m.create.version(),
@@ -109,7 +149,16 @@ func (m Model) submitCreate() tea.Cmd {
 		// Generous: a first pull of a database image is slow.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		inst, err := c.Create(ctx, opt)
+		inst, err := c.CreateStream(ctx, opt, func(ev runtime.PullEvent) {
+			// Non-blocking: a full channel means the interface is behind, and
+			// dropping a progress line is better than stalling the pull that
+			// is producing them.
+			select {
+			case ch <- pullMsg{ev: ev}:
+			default:
+			}
+		})
+		close(ch)
 		return createdMsg{inst: inst, err: err}
 	}
 }
@@ -250,7 +299,11 @@ func (m Model) advanceCreate() (tea.Model, tea.Cmd) {
 
 	case stepRestart:
 		c.step = stepSubmitting
-		return m, m.submitCreate()
+		c.pullPhase = "starting"
+		c.pullLayers = 0
+		c.pullStarted = time.Now()
+		c.pullCh = make(chan tea.Msg, 64)
+		return m, tea.Batch(m.submitCreate(c.pullCh), waitForPull(c.pullCh), spinTick())
 	}
 	return m, nil
 }
@@ -298,7 +351,7 @@ func (m Model) viewCreate() string {
 		b.WriteString(styleDim.Render(restartHelp(c.restarts[c.restartIndex])))
 		b.WriteString("\n")
 	case stepSubmitting:
-		b.WriteString(styleWarn.Render("creating... (pulling the image can take a while)"))
+		b.WriteString(c.progressLine())
 		b.WriteString("\n")
 	}
 
@@ -310,7 +363,7 @@ func (m Model) viewCreate() string {
 
 	b.WriteString("\n")
 	if c.step == stepSubmitting {
-		b.WriteString(styleHelp.Render("please wait..."))
+		b.WriteString(styleHelp.Render("first pull of an image can take a few minutes"))
 	} else {
 		b.WriteString(styleHelp.Render("up/down choose   enter next   esc cancel"))
 	}
@@ -395,4 +448,34 @@ func humanAge(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+// progressLine describes what the create is doing right now.
+//
+// There is no percentage because podman's API does not provide one: it reports
+// phases and announces each layer as it starts, with no byte counts and no
+// total. Showing a bar filling at an invented rate would be a lie that is
+// worse than the honest version -- a moving spinner, the current phase, how
+// many layers have started, and how long it has been going.
+func (c createModel) progressLine() string {
+	spin := spinFrames[c.spinFrame%len(spinFrames)]
+
+	phase := c.pullPhase
+	if phase == "" {
+		phase = "working"
+	}
+	if c.pullLayers > 0 {
+		phase = fmt.Sprintf("%s (layer %d)", phase, c.pullLayers)
+	}
+
+	elapsed := ""
+	if !c.pullStarted.IsZero() {
+		// Whole seconds: a millisecond-precision clock ticking in a spinner is
+		// noise, and it is the order of magnitude that reassures.
+		if d := time.Since(c.pullStarted).Round(time.Second); d > 0 {
+			elapsed = "  " + styleDim.Render(d.String())
+		}
+	}
+
+	return styleWarn.Render(fmt.Sprintf("%s %s", spin, phase)) + elapsed
 }

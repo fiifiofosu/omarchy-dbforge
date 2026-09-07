@@ -27,6 +27,9 @@ type Fake struct {
 	// RemovePathErr, if set, is returned by RemovePath -- used to simulate a
 	// failure to delete a subuid-owned data directory.
 	RemovePathErr error
+	// PullEvents, if set, is what PullImage reports as progress.
+	PullEvents []PullEvent
+
 	// Pulled records images PullImage was asked for.
 	Pulled []string
 	// LastCreateSpec is the spec passed to the most recent Create, so tests
@@ -70,12 +73,35 @@ func (f *Fake) ImageExists(_ context.Context, image string) (bool, error) {
 	return f.Images[image], nil
 }
 
-func (f *Fake) PullImage(_ context.Context, image string) error {
+func (f *Fake) PullImage(_ context.Context, image string, onProgress PullProgress) error {
+	f.mu.Lock()
+	f.Pulled = append(f.Pulled, image)
+	pullErr := f.PullErr
+	events := f.PullEvents
+	f.mu.Unlock()
+
+	// Emit outside the lock: a caller's progress handler may do anything,
+	// including call back into the runtime, and holding the lock across it
+	// would deadlock.
+	if onProgress != nil {
+		if events == nil {
+			// A plausible default, so tests that only care that progress
+			// happens do not have to spell one out.
+			events = []PullEvent{
+				{Message: "contacting registry"},
+				{Message: "downloading layers", Layer: 1},
+				{Message: "writing image", Layer: 1},
+			}
+		}
+		for _, ev := range events {
+			onProgress(ev)
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Pulled = append(f.Pulled, image)
-	if f.PullErr != nil {
-		return f.PullErr
+	if pullErr != nil {
+		return pullErr
 	}
 	f.Images[image] = true
 	return nil

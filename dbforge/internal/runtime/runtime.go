@@ -69,6 +69,26 @@ type CreateSpec struct {
 	RestartPolicy string
 }
 
+// PullEvent is one step of an image pull, as reported by the runtime.
+//
+// Podman's HTTP API reports pull progress as human-readable phase lines --
+// "Copying blob sha256:...", "Writing manifest to image destination" -- with
+// no byte counts and no percentage. That is a hard limit of the API, not a
+// simplification made here: there is no total to divide by, so anything
+// claiming to be a percentage would be invented. What can be reported
+// honestly is the phase, and how many layers have started.
+type PullEvent struct {
+	// Message is a short human-readable description of the current phase.
+	Message string `json:"message"`
+	// Layer counts layers whose download has begun, 1-based. Zero outside the
+	// copying phase. There is no known total: the API announces each layer as
+	// it starts, so the last one is only recognisable in hindsight.
+	Layer int `json:"layer,omitempty"`
+}
+
+// PullProgress receives PullEvents as a pull proceeds.
+type PullProgress func(PullEvent)
+
 // Runtime is the container engine DBForge drives.
 type Runtime interface {
 	// Ping verifies the engine is reachable.
@@ -80,7 +100,11 @@ type Runtime interface {
 	// ImageExists reports whether the image is present locally.
 	ImageExists(ctx context.Context, image string) (bool, error)
 	// PullImage fetches an image, returning a clear error for a bad tag.
-	PullImage(ctx context.Context, image string) error
+	//
+	// onProgress, when non-nil, is called as the pull proceeds. It is called
+	// from the calling goroutine, so an implementation must not assume it is
+	// cheap -- but it must also never block forever, or the pull stalls.
+	PullImage(ctx context.Context, image string, onProgress PullProgress) error
 	// Create makes a container and returns its ID.
 	Create(ctx context.Context, spec CreateSpec) (string, error)
 	Start(ctx context.Context, name string) error

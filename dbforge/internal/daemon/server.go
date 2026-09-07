@@ -13,7 +13,10 @@ import (
 	"strconv"
 	"time"
 
+	"sync"
+
 	"github.com/fiifiofosu/dbforge/internal/model"
+	"github.com/fiifiofosu/dbforge/internal/runtime"
 )
 
 // SocketPath is where dbforged listens. Frontends (CLI, TUI, waybar widget)
@@ -79,10 +82,25 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+// CreateEvent is one line of a streaming create. Exactly one field is set:
+// progress while the image is being fetched, then either the instance or an
+// error. Streaming is opt-in, so a client that just wants the result is
+// unaffected.
+type CreateEvent struct {
+	Progress *runtime.PullEvent `json:"progress,omitempty"`
+	Instance *model.Instance    `json:"instance,omitempty"`
+	Error    string             `json:"error,omitempty"`
+	Kind     string             `json:"kind,omitempty"`
+}
+
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var opt CreateOptions
 	if err := json.NewDecoder(r.Body).Decode(&opt); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if r.URL.Query().Get("stream") == "true" {
+		s.createStreaming(w, r, opt)
 		return
 	}
 	inst, err := s.mgr.Create(r.Context(), opt)
@@ -91,6 +109,42 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, inst)
+}
+
+// createStreaming reports progress as newline-delimited JSON.
+//
+// The status code has to be sent before the work starts, so it is always 200:
+// a failure is carried in the final event rather than the status line. That is
+// the usual trade for a streamed response, and the client reads the outcome
+// from the stream instead of from the header.
+func (s *Server) createStreaming(w http.ResponseWriter, r *http.Request, opt CreateOptions) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	fw := &flushWriter{w: w, f: flusher}
+	enc := json.NewEncoder(fw)
+
+	// Serialised because Manager may call the callback from its own goroutine
+	// and an Encoder is not safe for concurrent use.
+	var mu sync.Mutex
+	send := func(ev CreateEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = enc.Encode(ev)
+	}
+
+	opt.OnProgress = func(ev runtime.PullEvent) {
+		e := ev
+		send(CreateEvent{Progress: &e})
+	}
+
+	inst, err := s.mgr.Create(r.Context(), opt)
+	if err != nil {
+		send(CreateEvent{Error: err.Error(), Kind: errKind(err)})
+		return
+	}
+	send(CreateEvent{Instance: &inst})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -216,16 +270,29 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // "you asked for something impossible" from "the daemon broke".
 func writeErr(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError
-	kind := ""
 	switch {
 	case errors.Is(err, ErrInstanceNotFound):
-		code, kind = http.StatusNotFound, "not_found"
+		code = http.StatusNotFound
 	case errors.Is(err, ErrInstanceExists):
-		code, kind = http.StatusConflict, "conflict"
+		code = http.StatusConflict
 	case errors.Is(err, ErrContainerMissing):
-		code, kind = http.StatusConflict, "missing_container"
+		code = http.StatusConflict
 	}
-	writeJSON(w, code, errorResponse{Error: err.Error(), Kind: kind})
+	writeJSON(w, code, errorResponse{Error: err.Error(), Kind: errKind(err)})
+}
+
+// errKind names the error class for a client. A streamed response cannot use
+// the status line, so this is shared with writeErr rather than duplicated.
+func errKind(err error) string {
+	switch {
+	case errors.Is(err, ErrInstanceNotFound):
+		return "not_found"
+	case errors.Is(err, ErrInstanceExists):
+		return "conflict"
+	case errors.Is(err, ErrContainerMissing):
+		return "missing_container"
+	}
+	return ""
 }
 
 // Serve listens on the Unix socket until ctx is cancelled.
