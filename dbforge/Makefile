@@ -1,15 +1,29 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
-PREFIX  ?= $(HOME)/.local
 
-.PHONY: build test test-integration vet lint install uninstall clean
+# PREFIX defaults to a per-user install. Packaging overrides both, e.g.
+#   make DESTDIR="$pkgdir" PREFIX=/usr install
+PREFIX  ?= $(HOME)/.local
+DESTDIR ?=
+BINDIR  := $(PREFIX)/bin
+
+# A packaged install owns /usr/lib/systemd/user; a per-user one owns
+# ~/.config/systemd/user. Which applies is decided by PREFIX.
+ifeq ($(PREFIX),/usr)
+UNITDIR := $(PREFIX)/lib/systemd/user
+else
+UNITDIR := $(HOME)/.config/systemd/user
+endif
+
+.PHONY: build test test-integration vet install install-unit uninstall \
+        dist-tarball srcinfo pkgbuild-check hook-test clean
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o dist/dbforge ./cmd/dbforge
 	go build -ldflags "$(LDFLAGS)" -o dist/dbforge-tui ./cmd/dbforge-tui
 
 test:
-	go test ./...
+	go test -race ./...
 
 # Needs a working rootless Podman; pulls real images.
 test-integration:
@@ -17,19 +31,43 @@ test-integration:
 
 vet:
 	go vet ./...
+	go vet -tags integration ./...
 
-# Install one binary under two names, as spec 5 describes.
-install: build
-	install -Dm755 dist/dbforge $(PREFIX)/bin/dbforge
-	install -Dm755 dist/dbforge-tui $(PREFIX)/bin/dbforge-tui
+# The unit's ExecStart and PATH depend on where the binaries land, so it is
+# rendered rather than copied. @BINDIR@ is the only substitution.
+# A packaged install's BINDIR is already /usr/bin, so listing it again would
+# just duplicate the entry.
+ifeq ($(PREFIX),/usr)
+UNITPATH := /usr/local/bin:/usr/bin
+else
+UNITPATH := $(BINDIR):/usr/local/bin:/usr/bin
+endif
+
+dist/dbforged.service: packaging/dbforged.service.in
+	@mkdir -p dist
+	sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@PATH@|$(UNITPATH)|g' $< > $@
+
+install: build dist/dbforged.service
+	install -Dm755 dist/dbforge $(DESTDIR)$(BINDIR)/dbforge
+	install -Dm755 dist/dbforge-tui $(DESTDIR)$(BINDIR)/dbforge-tui
 	install -Dm755 packaging/waybar/dbforge-waybar-menu \
-		$(PREFIX)/bin/dbforge-waybar-menu
-	ln -sf dbforge $(PREFIX)/bin/dbforged
-	ln -sf dbforge $(PREFIX)/bin/dbctl
-	install -Dm644 packaging/dbforged.service \
-		$(HOME)/.config/systemd/user/dbforged.service
+		$(DESTDIR)$(BINDIR)/dbforge-waybar-menu
+	ln -sf dbforge $(DESTDIR)$(BINDIR)/dbforged
+	ln -sf dbforge $(DESTDIR)$(BINDIR)/dbctl
+	install -Dm644 dist/dbforged.service $(DESTDIR)$(UNITDIR)/dbforged.service
+	install -Dm644 packaging/waybar/module.jsonc \
+		$(DESTDIR)$(PREFIX)/share/dbforge/waybar/module.jsonc
+	install -Dm644 packaging/waybar/style.css \
+		$(DESTDIR)$(PREFIX)/share/dbforge/waybar/style.css
+	install -Dm755 packaging/waybar/install.sh \
+		$(DESTDIR)$(PREFIX)/share/dbforge/waybar/install.sh
+	install -Dm644 README.md $(DESTDIR)$(PREFIX)/share/doc/dbforge/README.md
+	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/dbforge/LICENSE
+	@[ -n "$(DESTDIR)" ] || $(MAKE) --no-print-directory post-install-notes
+
+post-install-notes:
 	@echo
-	@echo "Binaries installed. To enable the service, run:"
+	@echo "Binaries installed to $(BINDIR). To enable the service, run:"
 	@echo "  ./packaging/install.sh"
 	@echo "(it enables podman.socket and dbforged, and checks user lingering)"
 	@echo
@@ -40,16 +78,41 @@ install: build
 # deliberately left alone (spec 7, phase 5).
 uninstall:
 	-systemctl --user disable --now dbforged 2>/dev/null
-	rm -f $(PREFIX)/bin/dbforge $(PREFIX)/bin/dbforge-tui \
-		$(PREFIX)/bin/dbforged $(PREFIX)/bin/dbctl \
-		$(PREFIX)/bin/dbforge-waybar-menu
-	rm -f $(HOME)/.config/systemd/user/dbforged.service
+	rm -f $(BINDIR)/dbforge $(BINDIR)/dbforge-tui \
+		$(BINDIR)/dbforged $(BINDIR)/dbctl \
+		$(BINDIR)/dbforge-waybar-menu
+	rm -f $(UNITDIR)/dbforged.service
+	rm -rf $(PREFIX)/share/dbforge
 	-systemctl --user daemon-reload 2>/dev/null
 	@echo
 	@echo "Removed the program. Your databases are untouched:"
 	@echo "  containers: podman ps -a --filter label=io.dbforge.managed"
 	@echo "  data:       ~/.local/share/dbforge"
 	@echo "To remove those too, run 'dbctl rm <id> --wipe-data' BEFORE uninstalling."
+
+# Source tarball for a versioned AUR package. Uses git archive so it contains
+# exactly what is committed -- no dist/, no stray local files.
+dist-tarball:
+	@mkdir -p dist
+	git archive --format=tar.gz --prefix=dbforge-$(VERSION)/ \
+		-o dist/dbforge-$(VERSION).tar.gz HEAD
+	@echo "dist/dbforge-$(VERSION).tar.gz"
+
+# .SRCINFO is what the AUR indexes; it must be regenerated whenever the
+# PKGBUILD changes or the upload is rejected.
+srcinfo:
+	cd packaging/aur/dbforge-git && makepkg --printsrcinfo > .SRCINFO
+	@echo "regenerated packaging/aur/dbforge-git/.SRCINFO"
+
+# Builds the package for real and lists what it would install. Catches a
+# PKGBUILD that references a file that moved, which is the usual way these rot.
+pkgbuild-check:
+	./packaging/aur/check.sh
+
+# The install hooks only ever run on a real install, so they get their own
+# test: stub systemctl, source them, assert on the calls.
+hook-test:
+	./packaging/aur/hook-test.sh
 
 clean:
 	rm -rf dist

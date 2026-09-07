@@ -19,8 +19,18 @@ import (
 	"github.com/fiifiofosu/dbforge/internal/model"
 )
 
-// SchemaVersion is written into the file so a future release can migrate an
-// older config rather than misreading it (spec 7, phase 5).
+// SchemaVersion is the schema this build writes. It is stamped into the file
+// so an upgrade can migrate an older config rather than misreading it, and so
+// a downgrade refuses rather than corrupting it (spec 7, phase 5).
+//
+// Version history:
+//
+//	0  Pre-versioned. No schema_version key. Instances have no restart
+//	   policy, desired state or scope; the daemon fills those in.
+//	1  Current. schema_version, restart, desired and scope are present.
+//
+// Adding a version means adding a case to migrate() and a round-trip test
+// that starts from a real file written by the older build.
 const SchemaVersion = 1
 
 // ErrSchemaTooNew is returned when the file was written by a newer DBForge.
@@ -42,6 +52,12 @@ type Store struct {
 	// digest is the hash of the bytes we last read or wrote, used to detect
 	// external edits.
 	digest string
+	// loadedVersion is the schema version of the file we last read, so Save
+	// knows whether it is about to rewrite an older file in a newer format.
+	loadedVersion int
+	// backedUp records that the pre-migration backup has already been taken,
+	// so a long-running daemon writes it once rather than on every save.
+	backedUp bool
 }
 
 // New returns a Store for the given path.
@@ -68,6 +84,7 @@ func (s *Store) Load() ([]model.Instance, error) {
 	raw, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.digest = ""
+		s.loadedVersion = SchemaVersion // a file we create is current by definition
 		return nil, nil
 	}
 	if err != nil {
@@ -79,13 +96,52 @@ func (s *Store) Load() ([]model.Instance, error) {
 		return nil, fmt.Errorf("parsing %s: %w", s.path, err)
 	}
 	if f.SchemaVersion > SchemaVersion {
-		return nil, fmt.Errorf("%w: file is v%d, this build understands v%d",
-			ErrSchemaTooNew, f.SchemaVersion, SchemaVersion)
+		return nil, fmt.Errorf("%w: %s is schema v%d but this build understands v%d. "+
+			"Upgrade dbforge, or move the file aside to start fresh -- your databases "+
+			"are in podman and are not affected either way",
+			ErrSchemaTooNew, s.path, f.SchemaVersion, SchemaVersion)
+	}
+	// Capture the version before migrating, since migrate() rewrites it: Save
+	// needs to know what was on disk in order to back it up.
+	onDisk := f.SchemaVersion
+	if err := migrate(&f); err != nil {
+		return nil, fmt.Errorf("migrating %s from schema v%d: %w", s.path, onDisk, err)
 	}
 
+	s.loadedVersion = onDisk
 	s.digest = digest(raw)
 	sort.Slice(f.Instance, func(i, j int) bool { return f.Instance[i].ID < f.Instance[j].ID })
 	return f.Instance, nil
+}
+
+// LoadedVersion is the schema version of the file last read. It equals
+// SchemaVersion for a file this build wrote, and is lower for one written by
+// an older build that Save is about to upgrade in place.
+func (s *Store) LoadedVersion() int { return s.loadedVersion }
+
+// BackupPath is where Save stashes the original file before rewriting it in a
+// newer schema.
+func (s *Store) BackupPath(fromVersion int) string {
+	return fmt.Sprintf("%s.v%d.bak", s.path, fromVersion)
+}
+
+// migrate brings a parsed file up to SchemaVersion in memory.
+//
+// Nothing here rewrites the file; Save does that, after taking a backup. The
+// v0 case is deliberately a no-op on the instance fields: the daemon already
+// fills in restart, desired and scope from what it can observe about the live
+// container, which is better evidence than anything this layer could invent.
+// Its job is only to stop a v0 file being mistaken for a v1 one.
+func migrate(f *file) error {
+	for f.SchemaVersion < SchemaVersion {
+		switch f.SchemaVersion {
+		case 0:
+			f.SchemaVersion = 1
+		default:
+			return fmt.Errorf("no migration from v%d", f.SchemaVersion)
+		}
+	}
+	return nil
 }
 
 // ChangedOnDisk reports whether the file differs from what we last read or
@@ -116,6 +172,14 @@ func (s *Store) Save(instances []model.Instance, force bool) error {
 
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	// Rewriting an older file in the current schema is the one write that
+	// cannot be undone by reinstalling the old version, so keep the original.
+	if s.loadedVersion < SchemaVersion && !s.backedUp {
+		if err := s.backup(); err != nil {
+			return err
+		}
 	}
 
 	sorted := append([]model.Instance(nil), instances...)
@@ -161,6 +225,31 @@ func (s *Store) Save(instances []model.Instance, force bool) error {
 	}
 
 	s.digest = digest(buf)
+	s.loadedVersion = SchemaVersion
+	return nil
+}
+
+// backup copies the current file aside before a schema upgrade rewrites it.
+// A missing file needs no backup; an existing backup is never overwritten, so
+// the oldest -- and so the most original -- copy is the one that survives.
+func (s *Store) backup() error {
+	raw, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.backedUp = true
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading config for backup: %w", err)
+	}
+	dst := s.BackupPath(s.loadedVersion)
+	if _, err := os.Stat(dst); err == nil {
+		s.backedUp = true
+		return nil
+	}
+	if err := os.WriteFile(dst, raw, 0o600); err != nil {
+		return fmt.Errorf("writing schema backup %s: %w", dst, err)
+	}
+	s.backedUp = true
 	return nil
 }
 

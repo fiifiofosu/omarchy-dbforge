@@ -5,6 +5,7 @@ package integration
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -107,4 +108,35 @@ func purgeTestScopes() {
 		}
 		_ = exec.Command("podman", "rm", "-f", id).Run()
 	}
+}
+
+// fixtureBlock returns the port range restartFixture handed the original
+// manager, so a manager built to stand in for a restarted daemon allocates
+// from the same block rather than a fresh one.
+func fixtureBlock(t *testing.T) ports.Range {
+	t.Helper()
+	low, err := strconv.Atoi(os.Getenv("DBFORGE_TEST_PORT_LOW"))
+	if err != nil {
+		t.Fatalf("fixtureBlock called outside a restartFixture test: %v", err)
+	}
+	high, _ := strconv.Atoi(os.Getenv("DBFORGE_TEST_PORT_HIGH"))
+	return ports.Range{Low: low, High: high}
+}
+
+// stripV1Fields turns a config this build wrote back into one a pre-schema
+// build would have produced, for testing the migration on a real file.
+func stripV1Fields(toml string) string {
+	var kept []string
+	for _, line := range strings.Split(toml, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "schema_version"),
+			strings.HasPrefix(trimmed, "restart ="),
+			strings.HasPrefix(trimmed, "desired ="),
+			strings.HasPrefix(trimmed, "scope ="):
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }

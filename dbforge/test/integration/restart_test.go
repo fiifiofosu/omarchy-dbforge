@@ -12,7 +12,6 @@ import (
 
 	"github.com/fiifiofosu/dbforge/internal/daemon"
 	"github.com/fiifiofosu/dbforge/internal/model"
-	"github.com/fiifiofosu/dbforge/internal/ports"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
 	"github.com/fiifiofosu/dbforge/internal/store"
 )
@@ -55,10 +54,8 @@ func restartFixture(t *testing.T) (*daemon.Manager, *runtime.Podman, string, str
 // fixture -- a daemon restart, not a new daemon.
 func reopen(t *testing.T, rt *runtime.Podman, cfg, dataRoot string) *daemon.Manager {
 	t.Helper()
-	low, _ := strconv.Atoi(os.Getenv("DBFORGE_TEST_PORT_LOW"))
-	high, _ := strconv.Atoi(os.Getenv("DBFORGE_TEST_PORT_HIGH"))
 	m := daemon.NewManager(rt, store.New(cfg), daemon.Config{
-		DataRoot: dataRoot, PortRange: ports.Range{Low: low, High: high},
+		DataRoot: dataRoot, PortRange: fixtureBlock(t),
 		// Same scope as the fixture: this is a restart of the same daemon.
 		Scope: os.Getenv("DBFORGE_TEST_SCOPE"),
 	})

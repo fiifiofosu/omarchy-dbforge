@@ -213,7 +213,16 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	m.instances = next
 	m.mu.Unlock()
 
-	if len(rep.Adopted) > 0 || len(rep.Pruned) > 0 || len(rep.Missing) > 0 || len(rep.Unclean) > 0 {
+	drifted := len(rep.Adopted) > 0 || len(rep.Pruned) > 0 ||
+		len(rep.Missing) > 0 || len(rep.Unclean) > 0
+
+	// An upgrade over an older config must rewrite it even when nothing
+	// drifted, or a config that happens to reconcile cleanly stays on the old
+	// schema indefinitely -- and the next release's migration would then be
+	// starting from a version it no longer expects.
+	migrated := m.st.LoadedVersion() < store.SchemaVersion
+
+	if drifted || migrated {
 		// Reconciliation changed our view, so the index is stale. Force the
 		// write: we have just read the world, and our view is authoritative.
 		if err := m.save(true); err != nil {

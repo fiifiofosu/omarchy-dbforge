@@ -10,13 +10,16 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/dbforged
+ExecStart=@BINDIR@/dbforged
 Restart=on-failure
 RestartSec=2
 
-# ~/.local/bin is not on the systemd user manager's PATH by default: user
-# services never source ~/.bashrc.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+# The systemd user manager does not source ~/.bashrc, so its PATH has neither
+# ~/.local/bin nor anything else a shell would add. dbforge shells out to
+# `podman unshare` for one job (removing subuid-owned data), so podman must be
+# findable. Both placeholders are substituted at install time: ~/.local/bin for
+# a per-user install, /usr/bin for a packaged one.
+Environment=PATH=@PATH@
 
 # Stopping the daemon must not stop the databases. Containers are owned by
 # podman, not by this unit, so kill only the daemon process itself.

@@ -69,7 +69,18 @@ func runDaemon(ctx context.Context, _ []string) int {
 	notifier := notify.FromEnv(log)
 	defer notifier.Stop()
 
-	mgr := daemon.NewManager(rt, store.New(cfgPath), daemon.Config{
+	// Read the config once before anything writes, so an upgrade from an older
+	// schema can be reported accurately -- the first save rewrites the file in
+	// the current schema and the evidence is gone. A file from a *newer*
+	// dbforge is a hard stop here rather than a confusing failure later.
+	st := store.New(cfgPath)
+	if _, err := st.Load(); err != nil {
+		log.Error("reading config", "path", cfgPath, "error", err)
+		return 1
+	}
+	migratedFrom := st.LoadedVersion()
+
+	mgr := daemon.NewManager(rt, st, daemon.Config{
 		DataRoot:  dataRoot,
 		PortRange: ports.DefaultRange,
 		Log:       log,
@@ -87,6 +98,11 @@ func runDaemon(ctx context.Context, _ []string) int {
 	log.Info("reconciled",
 		"adopted", rep.Adopted, "missing", rep.Missing, "pruned", rep.Pruned,
 		"unclean", rep.Unclean, "config", cfgPath, "data_root", dataRoot)
+
+	if migratedFrom < store.SchemaVersion {
+		log.Info("migrated config schema", "from", migratedFrom,
+			"to", store.SchemaVersion, "backup", st.BackupPath(migratedFrom))
+	}
 
 	// Bring back instances the user left running. Rootless Podman does not
 	// start containers at boot by itself, so after a reboot this is what makes

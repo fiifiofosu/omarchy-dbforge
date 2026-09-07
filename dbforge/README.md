@@ -21,6 +21,7 @@ Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 
 - [Why this exists](#why-this-exists)
 - [Install](#install)
+- [Upgrading and uninstalling](#upgrading-and-uninstalling)
 - [Quick start](#quick-start)
 - [Commands](#commands)
 - [How it works](#how-it-works)
@@ -63,20 +64,51 @@ replication tooling.
 | `subuid`/`subgid` entries for your user | Rootless containers. Arch sets these up by default |
 | cgroups v2 with `cpu`, `memory`, `pids` delegated | Per-instance resource limits |
 
+### From the AUR
+
+```bash
+paru -S dbforge-git      # or: yay -S dbforge-git
+```
+
+The package installs to `/usr/bin`, ships the systemd user unit in
+`/usr/lib/systemd/user/`, and enables it for all users with `systemctl
+--global enable`. Two things it deliberately does not do for you, because
+neither is a package's decision to make:
+
+```bash
+systemctl --user enable --now podman.socket   # the daemon talks to this
+sudo loginctl enable-linger $USER             # so databases survive logout
+systemctl --user start dbforged
+```
+
+To keep the service from being enabled — on install and on every future
+upgrade:
+
+```bash
+sudo mkdir -p /etc/dbforge && sudo touch /etc/dbforge/no-autoenable
+sudo systemctl --global disable dbforged.service
+```
+
 ### From source
 
 ```bash
 git clone https://github.com/fiifiofosu/dbforge
 cd dbforge
 make install
+./packaging/install.sh
 ```
 
-That installs a single binary under two names (`dbforged`, `dbctl`) into
-`~/.local/bin`, plus a systemd user unit. Then:
+`make install` puts a single binary under two names (`dbforged`, `dbctl`) into
+`~/.local/bin` and renders the systemd user unit for that location.
+`install.sh` then enables `podman.socket` and `dbforged`, and tells you if user
+lingering is off.
+
+A per-user unit in `~/.config/systemd/user/` overrides a packaged one of the
+same name. If you install from source and later install the package, remove the
+per-user unit or it will keep pointing at `~/.local/bin`:
 
 ```bash
-systemctl --user enable --now podman.socket
-systemctl --user enable --now dbforged
+rm ~/.config/systemd/user/dbforged.service && systemctl --user daemon-reload
 ```
 
 ### A note on PATH
@@ -86,6 +118,59 @@ default, even though your shell does — `~/.bashrc` is never sourced for user
 services. The shipped unit sets `PATH` explicitly for this reason. If you
 invoke `dbctl` from a Hyprland keybind or a `.desktop` file, use the absolute
 path for the same reason.
+
+---
+
+## Upgrading and uninstalling
+
+### Upgrading
+
+An upgrade replaces the binaries; picking them up means restarting the daemon:
+
+```bash
+systemctl --user restart dbforged
+```
+
+**This does not stop your databases.** The containers are owned by Podman, not
+by the unit — `KillMode=process` means stopping the daemon kills only the
+daemon. On startup it reconciles against Podman and reattaches to whatever is
+already running, so an upgrade mid-afternoon does not drop your connections.
+There is an integration test that asserts exactly this: same container ID, same
+start time, same open state, across a daemon replacement.
+
+If the config schema changed between versions, the daemon migrates
+`instances.toml` on first start and keeps the original as
+`instances.toml.v<N>.bak`. It logs `migrated config schema` when it does. A
+config written by a *newer* DBForge than the one you are running is a hard
+error rather than a guess — downgrade-then-upgrade never corrupts the file.
+
+### Uninstalling
+
+```bash
+sudo pacman -Rns dbforge-git    # packaged
+make uninstall                  # from source
+```
+
+Either way **your databases are not removed.** Containers stay in Podman and
+data stays in `~/.local/share/dbforge`, because uninstalling a manager should
+never delete the thing it was managing. To find them afterwards:
+
+```bash
+podman ps -a --filter label=io.dbforge.managed
+ls ~/.local/share/dbforge
+```
+
+To remove the data too, do it deliberately *before* uninstalling, when the tool
+that understands the layout is still installed:
+
+```bash
+dbctl ls                              # list what you have
+dbctl rm <id> --wipe-data             # per instance
+```
+
+`--wipe-data` is the only path that removes database files, and it goes through
+`podman unshare` — the files are owned by a subuid your user cannot unlink
+directly, so `rm -rf` on that directory fails with EPERM.
 
 ---
 
@@ -348,7 +433,9 @@ Reconciliation is idempotent; a steady state reports no drift.
 | `~/.config/dbforge/instances.toml` | Instance index. Mode `0600` — it holds generated passwords |
 | `~/.local/share/dbforge/<engine>/<version>/<id>/` | The actual database files |
 | `$XDG_RUNTIME_DIR/dbforge/dbforged.sock` | Daemon socket, mode `0600` |
-| `~/.config/systemd/user/dbforged.service` | The user service |
+| `~/.config/systemd/user/dbforged.service` | The user service (source install) |
+| `/usr/lib/systemd/user/dbforged.service` | The user service (packaged install) |
+| `~/.config/dbforge/instances.toml.v<N>.bak` | Pre-migration config, kept when an upgrade changes the schema |
 
 Data deliberately lives outside anything a package manager owns, so
 uninstalling DBForge never deletes a database.
@@ -447,10 +534,11 @@ Adding an engine means one entry in `internal/engines/engines.go`.
 ## Development
 
 ```bash
-make test     # unit tests
-make vet
-make build    # -> dist/dbforge
-go test -race ./...
+make test              # unit tests, with -race
+make vet               # both build tags
+make build             # -> dist/dbforge, dist/dbforge-tui
+make test-integration  # needs a live rootless Podman; pulls real images
+make pkgbuild-check    # builds the AUR package and checks what it installs
 ```
 
 ### Layout
@@ -469,8 +557,13 @@ internal/registry/  engine version lists, cached for offline use
 internal/tui/       the Bubble Tea interface
 internal/notify/    signals the status bar when state changes
 packaging/waybar/   module definition, styling, menu script, installer
-packaging/          systemd user unit
+packaging/aur/      PKGBUILD, pacman install hooks, and a checker that builds it
+packaging/          systemd user unit template, per-user installer
 ```
+
+The systemd unit is a template (`packaging/dbforged.service.in`): `ExecStart`
+and `PATH` differ between a per-user install and a packaged one, so it is
+rendered at install time rather than shipped twice and allowed to diverge.
 
 ### Data directories are owned by a subordinate UID
 
@@ -588,14 +681,15 @@ probably under heavy load.
 | 3 | Bubble Tea TUI | ✅ done |
 | 4 | waybar module | ✅ done |
 | 4b | Quickshell module | ⬜ deferred (Omarchy 3.x is waybar-based) |
-| 5 | AUR packaging | ⬜ not started |
+| 5 | AUR packaging, upgrade and migration safety | ✅ done |
 | 6 | `dbctl doctor`, structured logging | ⬜ partial (logging done) |
 
 Full plan: [`docs/dbforge-omarchy-implementation-plan.md`](docs/dbforge-omarchy-implementation-plan.md).
 Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),
 [`docs/phase-2-notes.md`](docs/phase-2-notes.md),
 [`docs/phase-3-notes.md`](docs/phase-3-notes.md),
-[`docs/phase-4-notes.md`](docs/phase-4-notes.md).
+[`docs/phase-4-notes.md`](docs/phase-4-notes.md),
+[`docs/phase-5-notes.md`](docs/phase-5-notes.md).
 
 ---
 

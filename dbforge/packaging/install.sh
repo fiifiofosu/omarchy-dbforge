@@ -19,7 +19,11 @@ systemctl --user enable --now podman.socket
 
 say "Installing the dbforged unit"
 mkdir -p "$UNIT_DIR"
-install -m644 "$(dirname "$0")/dbforged.service" "$UNIT_DIR/dbforged.service"
+# The unit is a template: ExecStart and PATH depend on where the binaries went.
+sed -e "s|@BINDIR@|$PREFIX/bin|g" \
+    -e "s|@PATH@|$PREFIX/bin:/usr/local/bin:/usr/bin|g" \
+    "$(dirname "$0")/dbforged.service.in" > "$UNIT_DIR/dbforged.service"
+chmod 644 "$UNIT_DIR/dbforged.service"
 systemctl --user daemon-reload
 systemctl --user enable --now dbforged
 
