@@ -23,9 +23,17 @@ esac
 STUB
 # The hooks need to work out who pacman was run for.
 printf '#!/bin/sh\necho dv\n' > "$BIN/logname"
-chmod +x "$BIN/systemctl" "$BIN/loginctl" "$BIN/logname"
+# ...and check that user exists. Stubbed rather than using a real account, so
+# the test asserts the hook's logic and not the machine's user list: a
+# hardcoded name that happens to exist on a developer's box does not exist on
+# a CI runner, and the hook then bails out before doing anything.
+cat > "$BIN/id" <<'STUB'
+#!/bin/sh
+# The hook calls `id -u <user>` purely as an existence check.
+case "$2" in dv) exit 0 ;; *) exit 1 ;; esac
+STUB
+chmod +x "$BIN/systemctl" "$BIN/loginctl" "$BIN/logname" "$BIN/id"
 export PATH="$BIN:$PATH"
-# id -u must succeed for the resolved user, or the hook bails out early.
 export SUDO_USER=dv
 
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
@@ -62,6 +70,12 @@ SUDO_USER=root run post_install "$BIN/absent"
 grep -q 'enable-linger root' <<<"$CALLS" \
   && fail "the hook tried to set up root: [$CALLS]"
 pass "post_install never sets root up"
+
+# A user pacman names but who does not exist is not a user to set up either.
+SUDO_USER=ghost run post_install "$BIN/absent"
+grep -q 'enable-linger' <<<"$CALLS" \
+  && fail "the hook set up a user that does not exist: [$CALLS]"
+pass "post_install skips a user that does not exist"
 SUDO_USER=dv
 
 touch "$BIN/marker"

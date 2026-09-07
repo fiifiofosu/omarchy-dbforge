@@ -222,3 +222,19 @@ starting and restarting alike; with it present an upgrade only reports that new
 binaries are in place. There are tests for each of those paths, and one
 asserting the hook never sets *root* up — a package that enabled lingering for
 root would be both useless and rude.
+
+### The hook test was depending on the machine
+
+Those tests passed locally and failed on every CI runner. The hook validates
+the user it resolved with `id -u`, and the test had hardcoded a username that
+exists on a developer's box and nowhere else, so on a runner the hook correctly
+bailed out before doing anything and the assertions found nothing.
+
+The test now stubs `id` alongside `systemctl`, `loginctl` and `logname`, so it
+asserts the hook's logic rather than the host's user list. That also made a
+missing case obvious and cheap to add: a user pacman names who does not exist
+is skipped, the same as root.
+
+Twice now a packaging test has passed here and failed on a clean machine, for
+the same underlying reason — the developer's box has something the target does
+not. It is worth assuming that is true of anything packaging touches.
