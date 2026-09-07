@@ -1,0 +1,62 @@
+name: Arch package
+
+# Builds the AUR package on Arch, which is the only place makepkg means
+# anything. Kept separate and reusable so the same job gates a pull request and
+# a release: a release must not be the first time the packaging is exercised.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Ref to build'
+        type: string
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    # Everything the package's contents depend on. The Makefile decides the
+    # install layout, so it belongs here as much as the PKGBUILD does.
+    paths:
+      - 'packaging/**'
+      - 'Makefile'
+      - '.github/workflows/arch-package.yml'
+      - 'cmd/**'
+      - 'go.mod'
+  push:
+    branches: [develop]
+    paths:
+      - 'packaging/**'
+      - 'Makefile'
+      - '.github/workflows/arch-package.yml'
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      # The base-devel image has makepkg but not the toolchain this package
+      # builds with, nor git for the -git source.
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed git go
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+          fetch-depth: 0        # pkgver() needs history and tags
+
+      - name: Build and inspect the package
+        run: |
+          # makepkg refuses to run as root, and a container is root.
+          useradd -m builder
+          chown -R builder:builder .
+          # The checkout is not owned by builder, which git treats as suspect.
+          su builder -c "git config --global --add safe.directory '$PWD'"
+          su builder -c 'make hook-test'
+          su builder -c 'make pkgbuild-check'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.*
+          if-no-files-found: error

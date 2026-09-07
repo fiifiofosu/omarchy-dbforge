@@ -66,36 +66,13 @@ jobs:
           name: release-artifacts
           path: dist/
 
-  # The AUR package is built on Arch, because that is the only place makepkg
-  # means anything. It gates the release: shipping a tag whose package does not
-  # build would leave the packaging broken for exactly as long as nobody tried.
+  # Reuses the same job that gates pull requests, so a release is never the
+  # first time the packaging is exercised.
   package:
     needs: verify
-    runs-on: ubuntu-latest
-    container:
-      image: archlinux:base-devel
-    steps:
-      - name: Install the build dependencies
-        run: pacman -Syu --noconfirm --needed git go
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-          fetch-depth: 0
-
-      - name: Build and check the package
-        run: |
-          # makepkg refuses to run as root, and the container is root.
-          useradd -m builder
-          chown -R builder:builder .
-          # The checkout is not owned by builder's git config's idea of safe.
-          su builder -c 'git config --global --add safe.directory "$PWD"'
-          su builder -c 'make hook-test && make pkgbuild-check'
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: arch-package
-          path: dist/*.pkg.tar.*
+    uses: ./.github/workflows/arch-package.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
 
   release:
     needs: [build, package]
