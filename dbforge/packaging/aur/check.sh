@@ -90,6 +90,12 @@ if [ "${1:-}" = "--install" ]; then
   say "Installing $PKGFILE"
   sudo pacman -U --noconfirm "$PKGFILE"
 else
-  cp "$PKGFILE" "$REPO/dist/" 2>/dev/null || true
-  say "OK. Package left in dist/ ; re-run with --install to install it."
+  # dist/ may not exist yet -- makepkg builds in its own temp directory, so
+  # nothing here has necessarily created it. Errors are not swallowed: CI
+  # uploads this file as an artefact, and a silently skipped copy turned into
+  # a green build that published nothing.
+  mkdir -p "$REPO/dist"
+  cp "$PKGFILE" "$REPO/dist/"
+  say "OK. Package left in dist/$(basename "$PKGFILE")"
+  say "Re-run with --install to install it."
 fi
