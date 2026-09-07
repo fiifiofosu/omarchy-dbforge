@@ -29,7 +29,7 @@ else
 UNITDIR := $(HOME)/.config/systemd/user
 endif
 
-.PHONY: build test test-integration vet install install-unit uninstall \
+.PHONY: build test test-package test-integration vet install install-unit uninstall \
         dist-tarball srcinfo pkgbuild-check hook-test clean
 
 build:
@@ -38,6 +38,13 @@ build:
 
 test:
 	go test -tags "$(GOTAGS)" -race ./...
+
+# Tests as a package build runs them: same tags, no -race. Arch's Go packaging
+# flags include -buildmode=pie, which the race detector refuses to combine
+# with -- and a package build is not where race detection belongs, since CI
+# has already done it on the same commit.
+test-package:
+	go test -tags "$(GOTAGS)" ./...
 
 # Needs a working rootless Podman; pulls real images.
 test-integration:

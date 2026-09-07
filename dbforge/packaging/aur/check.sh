@@ -18,6 +18,16 @@ fail() { printf '\033[31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v makepkg >/dev/null || fail "makepkg not found (install pacman's base-devel)"
 
+# A developer's Arch box has podman's build dependencies, so a PKGBUILD that
+# builds or tests without the cgo-avoiding tags succeeds here and fails in a
+# clean chroot. Routing every go invocation through make is what keeps the tags
+# in one place, so check that nothing has slipped back to calling go directly.
+say "Checking the PKGBUILD builds through make"
+if grep -nE '^[[:space:]]*go (build|test)' "$REPO/packaging/aur/dbforge-git/PKGBUILD"; then
+  fail "PKGBUILD calls go directly; use a make target so GOTAGS applies"
+fi
+printf '    ok      no direct go invocations\n'
+
 say "Checking the pacman install hooks"
 "$REPO/packaging/aur/hook-test.sh" | sed 's/^/    /'
 
@@ -80,6 +90,12 @@ if [ "${1:-}" = "--install" ]; then
   say "Installing $PKGFILE"
   sudo pacman -U --noconfirm "$PKGFILE"
 else
-  cp "$PKGFILE" "$REPO/dist/" 2>/dev/null || true
-  say "OK. Package left in dist/ ; re-run with --install to install it."
+  # dist/ may not exist yet -- makepkg builds in its own temp directory, so
+  # nothing here has necessarily created it. Errors are not swallowed: CI
+  # uploads this file as an artefact, and a silently skipped copy turned into
+  # a green build that published nothing.
+  mkdir -p "$REPO/dist"
+  cp "$PKGFILE" "$REPO/dist/"
+  say "OK. Package left in dist/$(basename "$PKGFILE")"
+  say "Re-run with --install to install it."
 fi

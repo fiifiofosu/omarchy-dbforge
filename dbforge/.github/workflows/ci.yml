@@ -1,9 +1,15 @@
 name: CI
 
+# main is protected by review, not by pushing to it: work lands on develop and
+# reaches main through a pull request. So CI gates the PR, and runs on develop
+# pushes too -- finding out at PR time that a week of commits is broken is
+# worse than a few minutes of runner time per push.
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
+  push:
+    branches: [develop]
+  workflow_dispatch:
 
 # Every job goes through the Makefile rather than calling `go` directly. The
 # build needs specific tags to stay free of cgo (see GOTAGS in the Makefile),

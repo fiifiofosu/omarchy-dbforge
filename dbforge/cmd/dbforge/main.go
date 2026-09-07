@@ -46,7 +46,7 @@ func main() {
 }
 
 func runDaemon(ctx context.Context, _ []string) int {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
+	log := slog.New(logHandler())
 
 	rt, err := runtime.NewPodman(ctx, os.Getenv("DBFORGE_PODMAN_SOCKET"))
 	if err != nil {
@@ -60,7 +60,7 @@ func runDaemon(ctx context.Context, _ []string) int {
 		return 1
 	}
 
-	dataRoot, err := defaultDataRoot()
+	dataRoot, err := store.DefaultDataRoot()
 	if err != nil {
 		log.Error("resolving data root", "error", err)
 		return 1
@@ -130,24 +130,6 @@ func runDaemon(ctx context.Context, _ []string) int {
 	return 0
 }
 
-// defaultDataRoot is ~/.local/share/dbforge, honouring XDG_DATA_HOME. Data
-// lives outside the package's purview so uninstalling never deletes it
-// (spec 7, phase 5).
-func defaultDataRoot() (string, error) {
-	if d := os.Getenv("DBFORGE_DATA_ROOT"); d != "" {
-		return d, nil
-	}
-	dir := os.Getenv("XDG_DATA_HOME")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(dir, "dbforge"), nil
-}
-
 // superviseInterval is how often the daemon re-checks that instances which
 // should be running actually are. Zero disables supervision.
 func superviseInterval() time.Duration {
@@ -158,6 +140,20 @@ func superviseInterval() time.Duration {
 		}
 	}
 	return 30 * time.Second
+}
+
+// logHandler builds the daemon's logger.
+//
+// Text by default, because the usual reader is a person running
+// `journalctl --user -u dbforged`. DBFORGE_LOG_FORMAT=json switches to JSON
+// for the other case: attaching daemon output to a bug report, where being
+// able to filter by field beats being able to skim (spec 7, phase 6).
+func logHandler() slog.Handler {
+	opts := &slog.HandlerOptions{Level: logLevel()}
+	if os.Getenv("DBFORGE_LOG_FORMAT") == "json" {
+		return slog.NewJSONHandler(os.Stderr, opts)
+	}
+	return slog.NewTextHandler(os.Stderr, opts)
 }
 
 func logLevel() slog.Level {

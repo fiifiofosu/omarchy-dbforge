@@ -138,3 +138,21 @@ func TestHealthz(t *testing.T) {
 }
 
 var _ = ports.DefaultRange
+
+// Both ends of DBFORGE_SOCKET must agree. The CLI has always honoured it; the
+// daemon did not, so the override silently produced a daemon and a client
+// talking to different paths.
+func TestSocketPathHonoursTheEnvOverride(t *testing.T) {
+	t.Setenv("DBFORGE_SOCKET", "/tmp/custom/dbforged.sock")
+	if got := SocketPath(); got != "/tmp/custom/dbforged.sock" {
+		t.Fatalf("SocketPath() = %q, want the override", got)
+	}
+}
+
+func TestSocketPathFallsBackToRuntimeDir(t *testing.T) {
+	t.Setenv("DBFORGE_SOCKET", "")
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+	if got, want := SocketPath(), "/run/user/4242/dbforge/dbforged.sock"; got != want {
+		t.Fatalf("SocketPath() = %q, want %q", got, want)
+	}
+}

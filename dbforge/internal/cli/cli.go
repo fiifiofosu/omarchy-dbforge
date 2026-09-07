@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -33,6 +34,7 @@ Usage:
   dbctl restart-policy <id> <no|on-failure|always>
   dbctl restore
   dbctl engines
+  dbctl doctor [--json]
 
 Engines: %s
 
@@ -78,6 +80,8 @@ func Run(ctx context.Context, args []string) int {
 		err = runTUI()
 	case "engines":
 		fmt.Println(strings.Join(engines.Names(), "\n"))
+	case "doctor":
+		err = cmdDoctor(ctx, c, rest)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Printf(usage, strings.Join(engines.Names(), ", "))
@@ -85,6 +89,12 @@ func Run(ctx context.Context, args []string) int {
 	}
 
 	if err != nil {
+		// doctor has already printed a full report; adding "error: 3 check(s)
+		// failed" underneath it says nothing new.
+		var checks errCheckFailed
+		if errors.As(err, &checks) {
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
