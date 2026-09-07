@@ -90,9 +90,27 @@ a grep could embarrass.
 - **CI** runs on pull requests into `main` and on pushes to `develop`. Gating
   only the PR would mean discovering at merge time that a week of commits is
   broken.
-- **Release** runs on a `v*` tag. Tagging is the deliberate act; everything
-  else is a consequence of it, so a release can be reproduced by re-running
-  against the same tag.
+- **Release** runs on a merge to `main`, and publishes when the `VERSION` file
+  names a version that has not been tagged yet.
+
+The release was tag-driven first, and that was wrong. Merging the Phase 6 pull
+request produced no release, because nothing creates a tag: the deliberate act
+had been placed outside the flow it was supposed to conclude, so the only way
+to release was to remember a step the workflow never mentioned. Worse, the
+manual trigger asked for a tag that had never existed.
+
+Declaring the version in the repository fixes the direction. Bumping `VERSION`
+in a pull request is the deliberate act, it is reviewable alongside the change
+it describes, and merging carries it out. A merge that leaves `VERSION` alone
+releases nothing -- the workflow checks whether the tag already exists and
+stops, saying so in the run summary rather than failing silently, which is the
+failure mode it was fixing.
+
+Tagging happens after verification and before building, so binaries, tarball
+and the Arch package's own `pkgver` all describe the released version rather
+than an untagged commit. If a later job fails the tag exists without a release;
+deleting it and pushing again is a better failure than a release whose contents
+claim to be something else.
 
 The release workflow re-runs the full verification before building anything: a
 tag that would not pass a pull request has no business becoming a release. It

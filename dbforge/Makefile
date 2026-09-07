@@ -1,4 +1,13 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Prefer what git says, since on a released commit that is the tag itself.
+# Before the first tag -- and on any untagged commit -- fall back to the
+# VERSION file plus the commit, so a local build still reports something
+# related to the version being worked towards rather than a bare hash.
+# The release workflow rejects anything containing "dev" or "dirty", so this
+# fallback can never be mistaken for a real release.
+VERSION ?= $(shell \
+	git describe --tags --exact-match --dirty 2>/dev/null \
+	|| git describe --tags --dirty 2>/dev/null \
+	|| echo "$$(tr -d '[:space:]' < VERSION 2>/dev/null || echo 0.0.0)-dev+$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)")
 LDFLAGS := -X main.version=$(VERSION)
 
 # Podman's Go bindings drag in two cgo packages we never execute: gpgme, for
