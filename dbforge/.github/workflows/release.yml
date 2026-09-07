@@ -210,10 +210,11 @@ jobs:
 
               make install && ./packaging/install.sh
 
-          Then, once:
+          That is the whole installation — both paths enable the service and
+          turn on user lingering for you, so your databases survive logout.
+          There is no follow-up command:
 
-              systemctl --user enable --now podman.socket
-              sudo loginctl enable-linger "$USER"
+              dbctl create postgres:16 --name app-db
 
           Run `dbctl doctor` if anything does not work; it checks the rootless
           setup end to end and tells you what to fix.

@@ -1,47 +1,88 @@
-# Post-transaction messages and service wiring.
+# Post-transaction service wiring.
 #
 # dbforged is a *user* service: it runs as you, talks to your rootless Podman
-# socket, and owns containers in your user namespace. pacman runs as root and
-# has no user session, so it cannot start it. What it can do is `systemctl
-# --global enable`, which links the unit into every user's default.target --
-# the standard Arch mechanism for a user service shipped by a package.
+# socket, and owns containers in your user namespace. pacman runs as root, so
+# it cannot simply `systemctl --user start` it. What it can do, and does here:
+#
+#   - `systemctl --global enable`, linking the unit into every user's
+#     default.target. The standard Arch mechanism for a packaged user service.
+#   - `loginctl enable-linger`, so the user's systemd manager -- and so their
+#     databases -- survives logout and comes back at boot. This needs root,
+#     which is exactly what a package hook has, and leaving it as a printed
+#     instruction meant every install ended with homework.
+#   - start the service in the invoking user's session, so the install is
+#     usable now rather than after a logout.
+#
+# podman.socket is deliberately not enabled separately: dbforged.service
+# Wants= it, so starting the daemon starts the socket. A second thing to
+# enable would only be a second thing to keep in step.
 
 _note() { printf '\033[1m==>\033[0m %s\n' "$1"; }
+
+# The user pacman was run on behalf of. Root is not it, and a package that
+# enabled lingering for root would be both useless and rude.
+_invoking_user() {
+  local u="${SUDO_USER:-${PKGEXEC_UID:-}}"
+  [ -n "$u" ] || u="$(logname 2>/dev/null || true)"
+  case "$u" in ''|root) return 1 ;; esac
+  id -u "$u" >/dev/null 2>&1 || return 1
+  printf '%s' "$u"
+}
 
 # Overridable only so the branch can be tested without writing to /etc. pacman
 # sources this file inside its own transaction, so this is not a usable opt-out
 # at install time -- the marker file is.
 : "${_DBFORGE_MARKER:=/etc/dbforge/no-autoenable}"
 
+# Opt-out: create this file before installing (or before an upgrade that would
+# re-enable it) to keep the package's hands off the service entirely -- not
+# enabled, not started, not restarted. Someone who asks a package not to manage
+# their service means all of it, not just the parts that are convenient.
+_opted_out() { [ -e "$_DBFORGE_MARKER" ]; }
+
 _enable() {
-  # Opt-out: create this file before installing (or before an upgrade that
-  # would re-enable it) to keep the service off for everyone.
-  if [ -e "$_DBFORGE_MARKER" ]; then
-    _note "$_DBFORGE_MARKER exists; leaving dbforged disabled."
+  if _opted_out; then
+    _note "$_DBFORGE_MARKER exists; leaving dbforged alone."
     return
   fi
   systemctl --global enable dbforged.service >/dev/null 2>&1 || true
   _note "Enabled dbforged for all users on next login."
-  _note "  Opt out:  sudo mkdir -p /etc/dbforge && sudo touch /etc/dbforge/no-autoenable"
-  _note "            sudo systemctl --global disable dbforged.service"
+
+  local user
+  if ! user="$(_invoking_user)"; then
+    _note "Could not tell which user to set up; run 'dbctl doctor' as yourself."
+    return
+  fi
+
+  # Without lingering the user manager is torn down at logout, taking every
+  # database with it, and nothing comes back until someone logs in.
+  if [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || echo no)" != "yes" ]; then
+    if loginctl enable-linger "$user" >/dev/null 2>&1; then
+      _note "Enabled lingering for $user, so databases survive logout."
+    else
+      _note "Could not enable lingering. Run: sudo loginctl enable-linger $user"
+    fi
+  fi
+
+  # Start it in the user's own session, so the install is usable now rather
+  # than after a logout. Failure is fine and silent: there may be no session
+  # yet, in which case the --global enable above covers the next login.
+  if systemctl --machine="${user}@.host" --user start dbforged.service >/dev/null 2>&1; then
+    _note "Started dbforged for $user."
+  fi
+
+  _note "Opt out:  sudo mkdir -p /etc/dbforge && sudo touch /etc/dbforge/no-autoenable"
+  _note "          sudo systemctl --global disable dbforged.service"
 }
 
 post_install() {
   _enable
   cat <<'EOF'
 
-  Two things DBForge cannot do for you:
+  Ready. Nothing else to run:
 
-    systemctl --user enable --now podman.socket
-        The daemon talks to your rootless Podman socket.
-
-    sudo loginctl enable-linger $USER
-        Without lingering, your databases stop when you log out and do not
-        come back until you log back in.
-
-  Then:
-    systemctl --user start dbforged
     dbctl create postgres:16 --name app-db
+    dbctl doctor                      # if anything looks wrong
 
   Waybar widget (optional):
     /usr/share/dbforge/waybar/install.sh
@@ -53,17 +94,26 @@ EOF
 
 post_upgrade() {
   _enable
-  cat <<'EOF'
 
-  The new binaries are installed, but the running daemon is still the old one.
-  Pick it up with:
+  if _opted_out; then
+    _note "New binaries installed. Restart when you are ready:"
+    _note "  systemctl --user restart dbforged"
+    return
+  fi
 
-    systemctl --user restart dbforged
-
-  This does not stop your databases. The daemon reattaches to the containers
-  that are already running; restarting it is not restarting them.
-
-EOF
+  # The binaries on disk are new; the running daemon is still the old one.
+  # Restarting it does not stop the databases -- KillMode=process means the
+  # unit owns only the daemon, and on startup it reattaches to the containers
+  # already running. So do it, rather than asking.
+  local user
+  if user="$(_invoking_user)" &&
+     systemctl --machine="${user}@.host" --user is-active dbforged.service >/dev/null 2>&1; then
+    if systemctl --machine="${user}@.host" --user restart dbforged.service >/dev/null 2>&1; then
+      _note "Restarted dbforged for $user. Your databases kept running."
+    else
+      _note "Could not restart dbforged. Run: systemctl --user restart dbforged"
+    fi
+  fi
 }
 
 pre_remove() {
