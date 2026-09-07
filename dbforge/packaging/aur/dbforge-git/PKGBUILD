@@ -54,9 +54,15 @@ build() {
 
 check() {
   cd "$srcdir/$_pkgname"
-  # Unit tests only. The integration suite needs a live rootless Podman socket,
-  # which a build chroot does not have.
-  go test ./...
+  # Through make, so the build tags match build() exactly. A bare `go test`
+  # here compiled without them and pulled in the btrfs graph driver, which
+  # needs C headers a clean build chroot does not have -- invisible on a
+  # developer's Arch box, fatal in CI.
+  #
+  # Unit tests only: the integration suite needs a live rootless Podman socket,
+  # which a build chroot does not have. test-package rather than test because
+  # Arch's GOFLAGS set -buildmode=pie, which cannot be combined with -race.
+  make test-package
 }
 
 package() {
