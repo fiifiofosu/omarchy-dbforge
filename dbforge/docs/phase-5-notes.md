@@ -81,6 +81,57 @@ infers those from the live container — better evidence than the store could
 invent. The migration's only job is to stop a v0 file being mistaken for a v1
 one.
 
+## The build needed C headers and nobody noticed
+
+CI failed on the first push of this phase, and not on anything Phase 5
+touched:
+
+```
+Package gpgme was not found in the pkg-config search path.
+fatal error: btrfs/version.h: No such file or directory
+```
+
+Podman's Go bindings pull in two cgo packages: `github.com/proglottis/gpgme`,
+for verifying image signatures, and `go.podman.io/storage/drivers/btrfs`.
+Neither is something we execute — we are an HTTP client of podman, not a
+second copy of it — but both are in the import graph, and each needs C headers
+that a stock CI runner does not have.
+
+This had been true since Phase 0. It was invisible because every machine the
+build had ever run on had podman installed, and so had the headers. The
+standard tags fix it: `containers_image_openpgp` swaps gpgme for Go's own
+OpenPGP, `exclude_graphdriver_btrfs` drops the driver. With both, the module
+builds with cgo disabled entirely.
+
+Two things follow from "invisible locally":
+
+- `TestBuildsWithoutCgo` compiles the module with `CGO_ENABLED=0`. Dropping
+  the tags fails it on any machine, rather than on someone else's.
+- CI now runs `make` targets rather than its own `go` commands. Tags have to
+  be identical everywhere or the import graph differs between what CI checks
+  and what ships, and a workflow with its own copy of the commands is how they
+  drift apart. `GOTAGS` in the Makefile is the single definition; the PKGBUILD
+  gets them by calling `make`.
+
+A third CI job now stages `make DESTDIR=... PREFIX=/usr install` and asserts on
+the resulting tree. That catches a broken install layout on every push, without
+needing an Arch runner — only building the real package does.
+
+## Readiness budgets sized for a busy machine
+
+One integration run failed during this phase and passed on every rerun. The
+run took 107s, the shape of a wait timing out rather than an assertion
+failing, and it happened while `make test -race` was recompiling the whole
+module under the new tags -- load average near 4.
+
+Postgres had a 90s budget to finish `initdb` and start serving. That is
+comfortable on an idle laptop and marginal on a loaded one, which is the worst
+kind of timeout to pick: it passes for whoever chose it and fails for everyone
+else, intermittently. The budgets are now named constants sized for a cold
+image pull plus first-run initialisation on a machine doing something else --
+three minutes for Postgres, a minute for Redis. A CI runner is slower than
+this laptop on both counts.
+
 ## Uninstall
 
 Data lives in `~/.local/share/dbforge` and config in `~/.config/dbforge`,
@@ -106,6 +157,7 @@ publish time.
 
 | Behaviour | How |
 |---|---|
+| The build needs no C headers | `TestBuildsWithoutCgo`: `CGO_ENABLED=0` compile of the whole module |
 | Package builds from a clean checkout | `makepkg` against a `file://` clone, unit tests run in `check()` |
 | Installs every load-bearing path | `check.sh` asserts on binaries, symlinks, unit, waybar files, licence |
 | `dbctl`/`dbforged` are symlinks to one binary | `bsdtar -tvf` on the built package |

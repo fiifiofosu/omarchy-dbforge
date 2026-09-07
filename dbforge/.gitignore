@@ -4,3 +4,4 @@
 /dbctl
 *.test
 /packaging/aur/dbforge-git/.SRCINFO
+/stage/

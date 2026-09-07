@@ -136,6 +136,16 @@ func waitForPostgres(t *testing.T, port int, within time.Duration) {
 	})
 }
 
+// Readiness budgets. These cover a cold image pull plus first-run
+// initialisation on a machine that is also doing something else -- a CI runner,
+// or a laptop mid-build. Postgres gets far longer than Redis because initdb
+// writes a whole cluster before it listens; 90s was enough on an idle machine
+// and not enough on a busy one, which is the worst kind of timeout to pick.
+const (
+	pgReady    = 3 * time.Minute
+	redisReady = 60 * time.Second
+)
+
 func TestPostgresLifecycle(t *testing.T) {
 	ctx := context.Background()
 	m, _, _ := newManager(t)
@@ -152,7 +162,7 @@ func TestPostgresLifecycle(t *testing.T) {
 
 	// Reachable from the host, which is the whole point -- the container
 	// running is not the same as the user being able to connect.
-	waitForPostgres(t, inst.Port, 90*time.Second)
+	waitForPostgres(t, inst.Port, pgReady)
 
 	// The data directory must exist and be non-empty once initdb has run.
 	entries, err := os.ReadDir(inst.DataDir)
@@ -175,7 +185,7 @@ func TestPostgresLifecycle(t *testing.T) {
 	if err := m.Start(ctx, id); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
-	waitForPostgres(t, inst.Port, 90*time.Second)
+	waitForPostgres(t, inst.Port, pgReady)
 }
 
 func TestRedisLifecycleAndSideBySide(t *testing.T) {
@@ -201,8 +211,8 @@ func TestRedisLifecycleAndSideBySide(t *testing.T) {
 		t.Fatal("both instances share a data directory")
 	}
 
-	waitForRedis(t, ia.Port, 60*time.Second)
-	waitForRedis(t, ib.Port, 60*time.Second)
+	waitForRedis(t, ia.Port, redisReady)
+	waitForRedis(t, ib.Port, redisReady)
 
 	// Both must answer independently.
 	for _, p := range []int{ia.Port, ib.Port} {
@@ -232,7 +242,7 @@ func TestDataSurvivesStopStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	waitForRedis(t, inst.Port, 60*time.Second)
+	waitForRedis(t, inst.Port, redisReady)
 
 	// Write, then force a save so the value is on disk before we stop.
 	redis(t, inst.Port, "SET", "persisted", "yes")
@@ -244,7 +254,7 @@ func TestDataSurvivesStopStart(t *testing.T) {
 	if err := m.Start(ctx, id); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForRedis(t, inst.Port, 60*time.Second)
+	waitForRedis(t, inst.Port, redisReady)
 
 	if got := redis(t, inst.Port, "GET", "persisted"); !strings.Contains(got, "yes") {
 		t.Fatalf("value did not survive stop/start: %q", got)
@@ -264,7 +274,7 @@ func TestWipeRemovesSubuidOwnedData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	waitForPostgres(t, inst.Port, 90*time.Second)
+	waitForPostgres(t, inst.Port, pgReady)
 
 	// Plain removal is expected to fail; that is the trap being covered.
 	if err := os.RemoveAll(inst.DataDir); err == nil {

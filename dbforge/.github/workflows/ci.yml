@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Every job goes through the Makefile rather than calling `go` directly. The
+# build needs specific tags to stay free of cgo (see GOTAGS in the Makefile),
+# and a workflow that spelled out its own commands is exactly how CI ended up
+# building something the Makefile does not.
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,10 +17,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      - run: go vet ./...
-      - run: go vet -tags integration ./...
-      - run: go test -race ./...
-      - run: go build ./...
+      - run: make vet
+      - run: make test
+      - run: make build
 
   integration:
     runs-on: ubuntu-latest
@@ -29,4 +32,31 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y podman
           systemctl --user enable --now podman.socket
-      - run: go test -tags integration -timeout 20m ./test/integration/
+      - run: make test-integration
+
+  packaging:
+    # The install hooks and the Makefile's install layout are checkable
+    # anywhere; only building the actual package needs Arch.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Install hooks behave correctly
+        run: make hook-test
+      - name: Install layout is complete
+        run: |
+          make DESTDIR="$PWD/stage" PREFIX=/usr install
+          for path in \
+            usr/bin/dbforge usr/bin/dbforged usr/bin/dbctl usr/bin/dbforge-tui \
+            usr/bin/dbforge-waybar-menu \
+            usr/lib/systemd/user/dbforged.service \
+            usr/share/dbforge/waybar/module.jsonc \
+            usr/share/licenses/dbforge/LICENSE
+          do
+            test -e "stage/$path" || { echo "missing: $path"; exit 1; }
+            echo "ok $path"
+          done
+          grep -qx 'ExecStart=/usr/bin/dbforged' stage/usr/lib/systemd/user/dbforged.service
+          ! grep -qE '@BINDIR@|@PATH@' stage/usr/lib/systemd/user/dbforged.service

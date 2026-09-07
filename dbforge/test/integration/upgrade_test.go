@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/fiifiofosu/dbforge/internal/daemon"
 	"github.com/fiifiofosu/dbforge/internal/model"
@@ -33,7 +32,7 @@ func TestUpgradeLeavesRunningInstancesAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForRedis(t, inst.Port, 30*time.Second)
+	waitForRedis(t, inst.Port, redisReady)
 
 	// Something only this container knows. If it survives, the process did.
 	redis(t, inst.Port, "SET", "upgrade-witness", "alive")
@@ -96,7 +95,7 @@ func TestUpgradeMigratesPreVersionedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForRedis(t, inst.Port, 30*time.Second)
+	waitForRedis(t, inst.Port, redisReady)
 
 	// Rewrite the config the way an older build would have left it: no schema
 	// version, and none of the fields added since.

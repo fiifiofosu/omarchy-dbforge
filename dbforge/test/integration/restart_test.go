@@ -85,7 +85,7 @@ func TestRestoreAfterDaemonRestart(t *testing.T) {
 	if err := m.Stop(ctx, stopped, 20); err != nil {
 		t.Fatal(err)
 	}
-	waitForRedis(t, up.Port, 30*time.Second)
+	waitForRedis(t, up.Port, redisReady)
 
 	// Simulate the reboot: every container is down.
 	if err := rt.Stop(ctx, "dbforge-"+running, 20); err != nil {
@@ -109,7 +109,7 @@ func TestRestoreAfterDaemonRestart(t *testing.T) {
 	if got.Status == model.StatusRunning {
 		t.Fatal("an instance the user stopped came back after a restart")
 	}
-	waitForRedis(t, up.Port, 30*time.Second)
+	waitForRedis(t, up.Port, redisReady)
 }
 
 // TestUncleanExitIsDetectedFromRealContainer kills a container outright and
@@ -127,7 +127,7 @@ func TestUncleanExitIsDetectedFromRealContainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForRedis(t, inst.Port, 30*time.Second)
+	waitForRedis(t, inst.Port, redisReady)
 
 	// Stop with a zero timeout so the engine is killed rather than asked
 	// politely -- this is the OOM/crash shape.

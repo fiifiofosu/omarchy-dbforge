@@ -565,6 +565,17 @@ The systemd unit is a template (`packaging/dbforged.service.in`): `ExecStart`
 and `PATH` differ between a per-user install and a packaged one, so it is
 rendered at install time rather than shipped twice and allowed to diverge.
 
+### Build tags
+
+The build always carries `containers_image_openpgp,exclude_graphdriver_btrfs`
+(`GOTAGS` in the Makefile). Podman's bindings import gpgme and the btrfs graph
+driver — neither of which this program executes — and both need C headers that
+only a machine with podman's build dependencies has. The tags leave the module
+buildable with `CGO_ENABLED=0`, which `TestBuildsWithoutCgo` checks.
+
+Use `make` rather than bare `go` commands, or you will be testing a different
+import graph from the one that ships.
+
 ### Data directories are owned by a subordinate UID
 
 Under rootless Podman a container process running as a non-root user leaves

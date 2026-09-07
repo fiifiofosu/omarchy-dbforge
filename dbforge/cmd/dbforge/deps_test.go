@@ -1,10 +1,14 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
+
+// buildTags mirrors GOTAGS in the Makefile. Keep them in step.
+const buildTags = "containers_image_openpgp,exclude_graphdriver_btrfs"
 
 // The CLI must not link the TUI.
 //
@@ -15,7 +19,10 @@ import (
 // 0.05s. The TUI therefore lives in cmd/dbforge-tui, and this test keeps it
 // there.
 func TestCLIDoesNotLinkTheTUI(t *testing.T) {
-	out, err := exec.Command("go", "list", "-deps", ".").Output()
+	// Inspect the graph the real build produces: different tags, different
+	// dependencies, and this test would be answering about a binary nobody
+	// ships. buildTags mirrors GOTAGS in the Makefile.
+	out, err := exec.Command("go", "list", "-deps", "-tags", buildTags, ".").Output()
 	if err != nil {
 		t.Skipf("cannot run go list: %v", err)
 	}
@@ -27,5 +34,27 @@ func TestCLIDoesNotLinkTheTUI(t *testing.T) {
 			t.Errorf("cmd/dbforge depends on %s; that costs every CLI invocation "+
 				"a terminal query at startup. Keep the TUI in cmd/dbforge-tui.", banned)
 		}
+	}
+}
+
+// TestBuildsWithoutCgo is the guard for the tags in buildTags.
+//
+// Podman's bindings pull in gpgme and the btrfs graph driver, both cgo
+// packages needing C headers (gpgme.h, btrfs/version.h). A developer machine
+// with podman installed has those headers, so dropping the tags breaks
+// nothing locally and then fails on every CI runner and in every clean build
+// chroot. Building with cgo disabled proves the tags are still doing their
+// job, on any machine.
+func TestBuildsWithoutCgo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles the whole module")
+	}
+	cmd := exec.Command("go", "build", "-tags", buildTags, "-o", os.DevNull, "./...")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Dir = ".."
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the build needs C headers, which a CI runner will not have.\n"+
+			"Check the tags in buildTags (%s) against the Makefile's GOTAGS.\n%s",
+			buildTags, out)
 	}
 }

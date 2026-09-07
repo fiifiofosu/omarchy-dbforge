@@ -1,6 +1,20 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
+# Podman's Go bindings drag in two cgo packages we never execute: gpgme, for
+# verifying image signatures, and the btrfs graph driver. Both are the daemon's
+# job -- we are an HTTP client of podman, not a second copy of it -- but they
+# are in the import graph all the same, and each needs C headers (gpgme.h,
+# btrfs/version.h) that a stock CI runner does not have. These tags swap gpgme
+# for Go's own OpenPGP and drop the btrfs driver, which leaves the build with
+# no C dependencies at all.
+#
+# They must be used everywhere or nowhere: a build with different tags is a
+# different import graph. Hence one definition, used by every target here, by
+# CI, and by the PKGBUILD.
+GOTAGS  ?= containers_image_openpgp,exclude_graphdriver_btrfs
+TESTTAGS := integration,$(GOTAGS)
+
 # PREFIX defaults to a per-user install. Packaging overrides both, e.g.
 #   make DESTDIR="$pkgdir" PREFIX=/usr install
 PREFIX  ?= $(HOME)/.local
@@ -19,19 +33,19 @@ endif
         dist-tarball srcinfo pkgbuild-check hook-test clean
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o dist/dbforge ./cmd/dbforge
-	go build -ldflags "$(LDFLAGS)" -o dist/dbforge-tui ./cmd/dbforge-tui
+	go build -tags "$(GOTAGS)" -ldflags "$(LDFLAGS)" -o dist/dbforge ./cmd/dbforge
+	go build -tags "$(GOTAGS)" -ldflags "$(LDFLAGS)" -o dist/dbforge-tui ./cmd/dbforge-tui
 
 test:
-	go test -race ./...
+	go test -tags "$(GOTAGS)" -race ./...
 
 # Needs a working rootless Podman; pulls real images.
 test-integration:
-	go test -tags integration -timeout 20m ./test/integration/
+	go test -tags "$(TESTTAGS)" -timeout 20m ./test/integration/
 
 vet:
-	go vet ./...
-	go vet -tags integration ./...
+	go vet -tags "$(GOTAGS)" ./...
+	go vet -tags "$(TESTTAGS)" ./...
 
 # The unit's ExecStart and PATH depend on where the binaries land, so it is
 # rendered rather than copied. @BINDIR@ is the only substitution.
