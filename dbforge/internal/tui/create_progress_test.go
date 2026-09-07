@@ -80,3 +80,41 @@ func TestSpinnerStopsWhenNoLongerSubmitting(t *testing.T) {
 		t.Fatal("spinner kept ticking after the create finished")
 	}
 }
+
+// A TUI left open across an upgrade keeps running the old code while talking
+// to the new daemon, so everything the upgrade added appears not to work. The
+// window has to say so.
+func TestStaleWindowIsCalledOut(t *testing.T) {
+	m := Model{}
+	Version = "0.6.1"
+	t.Cleanup(func() { Version = "dev" })
+
+	if got := m.staleNote(); got != "" {
+		t.Fatalf("warned before the daemon version was known: %q", got)
+	}
+
+	updated, _ := m.Update(staleMsg{daemon: "0.7.0"})
+	m = updated.(Model)
+
+	note := m.staleNote()
+	for _, want := range []string{"0.6.1", "0.7.0", "quit and reopen"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("stale note is missing %q: %q", want, note)
+		}
+	}
+}
+
+// The note is persistent, not a transient status line: the consequence lasts
+// until the window is reopened, so a message that scrolls away would be read
+// once and puzzled over later.
+func TestStaleNoteAppearsInTheListView(t *testing.T) {
+	m := New(nil)
+	Version = "0.6.1"
+	t.Cleanup(func() { Version = "dev" })
+	m.daemonVersion = "0.7.0"
+	m.loaded = true
+
+	if !strings.Contains(m.viewList(), "quit and reopen") {
+		t.Fatalf("stale note absent from the list view:\n%s", m.viewList())
+	}
+}

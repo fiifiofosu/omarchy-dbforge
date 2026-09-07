@@ -48,6 +48,10 @@ func main() {
 func runDaemon(ctx context.Context, _ []string) int {
 	log := slog.New(logHandler())
 
+	// So a client can tell whether it is older than the daemon it is talking
+	// to; an upgrade replaces binaries without restarting running processes.
+	daemon.Version = version
+
 	rt, err := runtime.NewPodman(ctx, os.Getenv("DBFORGE_PODMAN_SOCKET"))
 	if err != nil {
 		log.Error("podman unavailable", "error", err)

@@ -53,6 +53,10 @@ type Model struct {
 	statusErr  bool
 	statusTime time.Time
 
+	// daemonVersion is set only when it differs from this binary's, meaning
+	// this process predates an upgrade and is running superseded code.
+	daemonVersion string
+
 	logs    logsModel
 	create  createModel
 	destroy destroyModel
@@ -60,6 +64,15 @@ type Model struct {
 }
 
 // New builds the root model.
+// Version is this binary's build version, set by the TUI's main.
+//
+// It is compared against the daemon's so a TUI left open across an upgrade can
+// say so. That is not hypothetical: replacing the binaries does not restart a
+// running process, so an open TUI keeps executing the old code while talking
+// to the new daemon, and whatever the upgrade added simply appears not to
+// work.
+var Version = "dev"
+
 func New(c *cli.Client) Model {
 	return Model{
 		client:   c,
@@ -70,7 +83,26 @@ func New(c *cli.Client) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchInstances(), tick())
+	return tea.Batch(m.fetchInstances(), m.checkVersion(), tick())
+}
+
+// staleMsg carries the daemon's version when it differs from this binary's.
+type staleMsg struct{ daemon string }
+
+// checkVersion asks the daemon what it is running. Failure is silent: the
+// daemon being unreachable is already reported by the instance fetch, and a
+// second complaint about the same thing is noise.
+func (m Model) checkVersion() tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		v, err := c.Version(ctx)
+		if err != nil || v == "" || v == Version {
+			return nil
+		}
+		return staleMsg{daemon: v}
+	}
 }
 
 // --- messages ---
@@ -223,6 +255,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.create.spinFrame++
 		return m, spinTick()
 
+	case staleMsg:
+		m.daemonVersion = msg.daemon
+		return m, nil
+
 	case createdMsg:
 		if msg.err != nil {
 			// Stay on the form so the user can fix the input rather than
@@ -367,7 +403,12 @@ func (m Model) viewList() string {
 
 	b.WriteString(styleTitle.Render("DBForge"))
 	b.WriteString(styleDim.Render("  local database instances"))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if note := m.staleNote(); note != "" {
+		b.WriteString(note)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	switch {
 	case m.daemonErr != nil:
@@ -520,3 +561,18 @@ func wrap(s string, width int) string {
 }
 
 func engineNames() []string { return engines.Names() }
+
+// staleNote warns that this process is older than the daemon.
+//
+// It is shown persistently rather than as a transient status line, because the
+// consequence is persistent: every feature the upgrade added is missing until
+// the window is reopened, and a message that scrolls away after three seconds
+// would be read once and then wondered about for an hour.
+func (m Model) staleNote() string {
+	if m.daemonVersion == "" {
+		return ""
+	}
+	return styleWarn.Render(fmt.Sprintf(
+		"  this window is running %s, the daemon is %s -- quit and reopen to pick up the new build",
+		Version, m.daemonVersion))
+}

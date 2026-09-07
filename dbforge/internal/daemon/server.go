@@ -57,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /version", s.handleVersion)
 	mux.HandleFunc("GET /instances", s.handleList)
 	mux.HandleFunc("POST /instances", s.handleCreate)
 	mux.HandleFunc("POST /instances/{id}/start", s.handleStart)
@@ -68,6 +69,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /instances/{id}/restart-policy", s.handleRestartPolicy)
 	mux.HandleFunc("POST /restore", s.handleRestore)
 	return mux
+}
+
+// Version is the daemon's build version, stamped by main at startup.
+//
+// It exists so a long-lived client -- the TUI, which people leave open for
+// days -- can notice it is older than the daemon it is talking to. An upgrade
+// replaces the binary on disk without touching a process already running, so
+// the two silently drift apart and features the daemon has appear missing.
+var Version = "dev"
+
+type versionResponse struct {
+	Version string `json:"version"`
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, versionResponse{Version: Version})
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

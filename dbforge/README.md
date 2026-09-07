@@ -304,6 +304,11 @@ is shown is the phase, the layer count, and the elapsed time.
 An image you already have is not downloaded again — creating a second instance
 of the same engine version reuses the local image and works offline.
 
+**After an upgrade, reopen the TUI.** Replacing the binaries does not restart a
+window you already have open, so it keeps running the old code against the new
+daemon. When that happens the TUI says so under its title, naming both
+versions; quitting and reopening is the whole fix.
+
 ---
 
 ### `dbctl doctor`
