@@ -274,6 +274,38 @@ testable by hand.
 
 ---
 
+### Creating an instance
+
+The first time you use an engine version, its image has to be downloaded, which
+can take minutes. Both the CLI and the TUI report each phase as the daemon
+reaches it, rather than sitting silent:
+
+```
+$ dbctl create redis:7.4 --name cache
+  pulling docker.io/library/redis:7.4
+  contacting registry
+  checking signatures
+  downloading layers (layer 1)
+  ...
+  writing image (layer 7)
+Created cache (redis:7.4) on port 15382
+```
+
+Progress goes to stderr, so `dbctl create ... > file` still captures only the
+result. In the TUI the same phases appear with a spinner and an elapsed clock —
+phases can be tens of seconds apart on a slow link, so something has to keep
+moving in between.
+
+**There is no percentage, deliberately.** Podman's HTTP API reports phases and
+announces each layer as it starts; it sends no byte counts and no total. A bar
+filling at an invented rate would be a worse answer than an honest one, so what
+is shown is the phase, the layer count, and the elapsed time.
+
+An image you already have is not downloaded again — creating a second instance
+of the same engine version reuses the local image and works offline.
+
+---
+
 ### `dbctl doctor`
 
 The first thing to run when something does not work. It checks the rootless
@@ -811,7 +843,8 @@ Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),
 [`docs/phase-3-notes.md`](docs/phase-3-notes.md),
 [`docs/phase-4-notes.md`](docs/phase-4-notes.md),
 [`docs/phase-5-notes.md`](docs/phase-5-notes.md),
-[`docs/phase-6-notes.md`](docs/phase-6-notes.md).
+[`docs/phase-6-notes.md`](docs/phase-6-notes.md),
+[`docs/phase-7-notes.md`](docs/phase-7-notes.md).
 
 ---
 

@@ -99,12 +99,74 @@ func (p *Podman) Inspect(_ context.Context, name string) (Container, error) {
 	return c, nil
 }
 
+// pullProgressWriter turns podman's progress text into PullEvents.
+//
+// The stream arrives as whole lines, but nothing guarantees one Write per
+// line, so partial lines are held until their newline arrives. Without that a
+// slow connection would produce events with half a phase name in them.
+type pullProgressWriter struct {
+	emit    PullProgress
+	partial string
+	layers  int
+}
+
+func (w *pullProgressWriter) Write(p []byte) (int, error) {
+	w.partial += string(p)
+	for {
+		i := strings.IndexByte(w.partial, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		line := strings.TrimSpace(w.partial[:i])
+		w.partial = w.partial[i+1:]
+		if line == "" {
+			continue
+		}
+		w.emit(w.classify(line))
+	}
+}
+
+// classify maps one of podman's lines onto a PullEvent.
+//
+// The wording is podman's; only the blob digests are dropped, since a 64-hex
+// digest tells the reader nothing and pushes the useful part off the line.
+func (w *pullProgressWriter) classify(line string) PullEvent {
+	switch {
+	case strings.HasPrefix(line, "Trying to pull"):
+		return PullEvent{Message: "contacting registry"}
+	case strings.HasPrefix(line, "Getting image source signatures"):
+		return PullEvent{Message: "checking signatures"}
+	case strings.HasPrefix(line, "Copying blob"):
+		w.layers++
+		return PullEvent{Message: "downloading layers", Layer: w.layers}
+	case strings.HasPrefix(line, "Copying config"):
+		return PullEvent{Message: "downloading config", Layer: w.layers}
+	case strings.HasPrefix(line, "Writing manifest"):
+		return PullEvent{Message: "writing image", Layer: w.layers}
+	case strings.HasPrefix(line, "Storing signatures"):
+		return PullEvent{Message: "storing signatures", Layer: w.layers}
+	default:
+		// Anything unrecognised is still worth showing: podman knows more
+		// about what it is doing than this switch does.
+		return PullEvent{Message: line, Layer: w.layers}
+	}
+}
+
 func (p *Podman) ImageExists(_ context.Context, image string) (bool, error) {
 	return images.Exists(p.conn, image, nil)
 }
 
-func (p *Podman) PullImage(_ context.Context, image string) error {
-	_, err := images.Pull(p.conn, image, &images.PullOptions{})
+func (p *Podman) PullImage(_ context.Context, image string, onProgress PullProgress) error {
+	opts := &images.PullOptions{}
+	if onProgress != nil {
+		// Podman streams progress as text lines. Writing them into a parser
+		// rather than a buffer means the caller sees each phase as it happens,
+		// which is the whole point -- a buffer would hand over the entire
+		// history the instant the pull finished.
+		var w io.Writer = &pullProgressWriter{emit: onProgress}
+		opts = opts.WithProgressWriter(w).WithQuiet(false)
+	}
+	_, err := images.Pull(p.conn, image, opts)
 	if err != nil {
 		// A nonexistent tag surfaces here. Keep the registry's own wording --
 		// it is more informative than anything we would invent.

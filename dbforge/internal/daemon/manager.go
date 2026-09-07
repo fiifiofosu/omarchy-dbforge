@@ -368,6 +368,11 @@ type CreateOptions struct {
 	Start            bool
 	// Restart is the policy for automatic restarts. Empty means the default.
 	Restart model.RestartPolicy
+
+	// OnProgress, when set, is called as the image is pulled. It is not part
+	// of the wire format -- the server sets it to a function that streams
+	// events to the client, which is why it carries a json:"-" tag.
+	OnProgress runtime.PullProgress `json:"-"`
 }
 
 // Create makes a new instance. It is deliberately ordered so that a crash at
@@ -412,9 +417,16 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 		return model.Instance{}, err
 	}
 	if !have {
-		if err := m.rt.PullImage(ctx, image); err != nil {
+		if opt.OnProgress != nil {
+			opt.OnProgress(runtime.PullEvent{Message: "pulling " + image})
+		}
+		if err := m.rt.PullImage(ctx, image, opt.OnProgress); err != nil {
 			return model.Instance{}, fmt.Errorf("image %s is not available: %w", image, err)
 		}
+	} else if opt.OnProgress != nil {
+		// Worth saying: "nothing happened for a second and then it worked" is
+		// less reassuring than being told the image was already here.
+		opt.OnProgress(runtime.PullEvent{Message: "image already downloaded"})
 	}
 
 	alloc := ports.New(m.cfg.Probe, m.takenPorts())

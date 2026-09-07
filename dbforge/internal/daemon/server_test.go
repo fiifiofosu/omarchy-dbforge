@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -17,8 +18,18 @@ import (
 
 func newTestServer(t *testing.T) (*httptest.Server, *runtime.Fake) {
 	t.Helper()
-	dir := t.TempDir()
 	fake := runtime.NewFake()
+	h, _ := newTestHandler(t, fake)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv, fake
+}
+
+// newTestHandler builds the handler and its manager over a caller-supplied
+// fake, for tests that need to seed the runtime or drive the manager directly.
+func newTestHandler(t *testing.T, fake *runtime.Fake) (http.Handler, *Manager) {
+	t.Helper()
+	dir := t.TempDir()
 	m := NewManager(fake, store.New(filepath.Join(dir, "instances.toml")), Config{
 		DataRoot: filepath.Join(dir, "data"),
 		Probe:    func(int) error { return nil },
@@ -26,9 +37,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *runtime.Fake) {
 	if _, err := m.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewServer(m, testLogger()).Handler())
-	t.Cleanup(srv.Close)
-	return srv, fake
+	return NewServer(m, testLogger()).Handler(), m
 }
 
 func TestAPICreateListRemoveRoundTrip(t *testing.T) {
@@ -154,5 +163,123 @@ func TestSocketPathFallsBackToRuntimeDir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "/run/user/4242")
 	if got, want := SocketPath(), "/run/user/4242/dbforge/dbforged.sock"; got != want {
 		t.Fatalf("SocketPath() = %q, want %q", got, want)
+	}
+}
+
+// A streaming create must report progress as it happens, not hand over the
+// whole history once the work is done -- the point is to show something is
+// happening during a slow pull.
+func TestStreamingCreateReportsProgressThenTheInstance(t *testing.T) {
+	fake := runtime.NewFake()
+	fake.PullEvents = []runtime.PullEvent{
+		{Message: "contacting registry"},
+		{Message: "downloading layers", Layer: 1},
+		{Message: "downloading layers", Layer: 2},
+	}
+	h, _ := newTestHandler(t, fake)
+
+	body, _ := json.Marshal(CreateOptions{Ref: "redis:7", ID: "streamed"})
+	req := httptest.NewRequest(http.MethodPost, "/instances?stream=true", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a stream reports failure in its body)", rec.Code)
+	}
+
+	var progress []runtime.PullEvent
+	var created *model.Instance
+	dec := json.NewDecoder(rec.Body)
+	for {
+		var ev CreateEvent
+		if err := dec.Decode(&ev); err != nil {
+			break
+		}
+		switch {
+		case ev.Progress != nil:
+			progress = append(progress, *ev.Progress)
+		case ev.Instance != nil:
+			created = ev.Instance
+		case ev.Error != "":
+			t.Fatalf("unexpected error event: %s", ev.Error)
+		}
+	}
+
+	if created == nil {
+		t.Fatal("stream ended without an instance")
+	}
+	if created.ID != "streamed" {
+		t.Fatalf("created %q, want streamed", created.ID)
+	}
+	if len(progress) < len(fake.PullEvents) {
+		t.Fatalf("got %d progress events, want at least %d: %+v",
+			len(progress), len(fake.PullEvents), progress)
+	}
+	// The layer counter is what the interface shows, so it has to survive.
+	var maxLayer int
+	for _, p := range progress {
+		if p.Layer > maxLayer {
+			maxLayer = p.Layer
+		}
+	}
+	if maxLayer != 2 {
+		t.Fatalf("highest layer reported = %d, want 2", maxLayer)
+	}
+}
+
+// A streamed failure cannot use the status line, since 200 was already sent
+// before the work began. It must arrive as an event, with its kind intact so
+// the client can still tell a conflict from a broken daemon.
+func TestStreamingCreateReportsFailureAsAnEvent(t *testing.T) {
+	h, mgr := newTestHandler(t, runtime.NewFake())
+	if _, err := mgr.Create(context.Background(), CreateOptions{Ref: "redis:7", ID: "taken"}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(CreateOptions{Ref: "redis:7", ID: "taken"})
+	req := httptest.NewRequest(http.MethodPost, "/instances?stream=true", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var last CreateEvent
+	dec := json.NewDecoder(rec.Body)
+	for {
+		var ev CreateEvent
+		if err := dec.Decode(&ev); err != nil {
+			break
+		}
+		last = ev
+	}
+	if last.Error == "" {
+		t.Fatalf("stream ended without an error event: %+v", last)
+	}
+	if last.Kind != "conflict" {
+		t.Fatalf("kind = %q, want conflict so the client can classify it", last.Kind)
+	}
+}
+
+// The non-streaming path is what every existing client uses; adding streaming
+// must not have changed it.
+func TestNonStreamingCreateStillReturnsPlainJSON(t *testing.T) {
+	h, _ := newTestHandler(t, runtime.NewFake())
+
+	body, _ := json.Marshal(CreateOptions{Ref: "redis:7", ID: "plain"})
+	req := httptest.NewRequest(http.MethodPost, "/instances", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	var inst model.Instance
+	if err := json.Unmarshal(rec.Body.Bytes(), &inst); err != nil {
+		t.Fatalf("body is not a plain instance: %v\n%s", err, rec.Body.String())
+	}
+	if inst.ID != "plain" {
+		t.Fatalf("got %q, want plain", inst.ID)
 	}
 }

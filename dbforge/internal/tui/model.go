@@ -205,6 +205,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.create.applyVersions(msg.engine, msg.result)
 		return m, nil
 
+	case pullMsg:
+		// Latest phase wins: this is a status line, not a log. The layer
+		// counter only ever grows, so a dropped message costs nothing.
+		m.create.pullPhase = msg.ev.Message
+		if msg.ev.Layer > m.create.pullLayers {
+			m.create.pullLayers = msg.ev.Layer
+		}
+		return m, waitForPull(m.create.pullCh)
+
+	case spinMsg:
+		if m.create.step != stepSubmitting {
+			// The create finished; stop ticking rather than spinning forever
+			// behind whatever view replaced it.
+			return m, nil
+		}
+		m.create.spinFrame++
+		return m, spinTick()
+
 	case createdMsg:
 		if msg.err != nil {
 			// Stay on the form so the user can fix the input rather than
