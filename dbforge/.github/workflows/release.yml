@@ -1,0 +1,157 @@
+name: Release
+
+# Releases are cut from a tag on main, never from a branch. Tagging is the
+# deliberate act; everything here is a consequence of it, so a release can be
+# reproduced exactly by re-running against the same tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build a release from'
+        required: true
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  # The gate. A tag that does not pass the same checks a pull request has to
+  # pass has no business becoming a release.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0        # `make dist-tarball` and pkgver() need history
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: make vet
+      - run: make test
+      - run: make hook-test
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Build binaries and the source tarball
+        run: |
+          make build
+          make dist-tarball
+
+      - name: Confirm the binaries report the tagged version
+        run: |
+          version="$(./dist/dbforge --version)"
+          echo "$version"
+          # A release whose binary reports "dev" is worse than no release: every
+          # bug report from it is unattributable. "-dirty" means the tree had
+          # uncommitted changes, so the tag does not describe what was built.
+          case "$version" in
+            *dev*)   echo "binary was not stamped with the tag"; exit 1 ;;
+            *dirty*) echo "built from a dirty tree; the tag does not describe it"; exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+  # The AUR package is built on Arch, because that is the only place makepkg
+  # means anything. It gates the release: shipping a tag whose package does not
+  # build would leave the packaging broken for exactly as long as nobody tried.
+  package:
+    needs: verify
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install the build dependencies
+        run: pacman -Syu --noconfirm --needed git go
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Build and check the package
+        run: |
+          # makepkg refuses to run as root, and the container is root.
+          useradd -m builder
+          chown -R builder:builder .
+          # The checkout is not owned by builder's git config's idea of safe.
+          su builder -c 'git config --global --add safe.directory "$PWD"'
+          su builder -c 'make hook-test && make pkgbuild-check'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.*
+
+  release:
+    needs: [build, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-package
+          path: dist/
+
+      # Generated here rather than in the build job so the file covers every
+      # artefact actually being published, the Arch package included.
+      - name: Checksum the artefacts
+        run: |
+          cd dist
+          sha256sum dbforge dbforge-tui *.tar.gz *.pkg.tar.* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --notes-file - \
+            dist/dbforge dist/dbforge-tui dist/*.tar.gz dist/*.pkg.tar.* dist/SHA256SUMS <<'NOTES'
+          ## Install
+
+          Arch, from the AUR package in `packaging/aur/dbforge-git`:
+
+              packaging/aur/check.sh --install
+
+          From source:
+
+              make install && ./packaging/install.sh
+
+          Then, once:
+
+              systemctl --user enable --now podman.socket
+              sudo loginctl enable-linger "$USER"
+
+          Run `dbctl doctor` if anything does not work; it checks the rootless
+          setup end to end and tells you what to fix.
+
+          ## Your data
+
+          Instance data lives in `~/.local/share/dbforge` and is never touched
+          by installing, upgrading or removing DBForge.
+          NOTES

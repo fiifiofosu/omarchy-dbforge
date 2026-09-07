@@ -58,3 +58,31 @@ func TestBuildsWithoutCgo(t *testing.T) {
 			buildTags, out)
 	}
 }
+
+// TestNoTelemetryIsLinked backs the promise in the README (spec 7, phase 6:
+// telemetry-free by default, opt-in only if ever added).
+//
+// It cannot assert OpenTelemetry is absent: podman's bindings instrument their
+// HTTP client with it, so otel's *API* is in the graph either way. What makes
+// that harmless is the absence of an exporter and of the SDK's tracer
+// provider -- without those, every span is recorded into a no-op and nothing
+// can leave the machine. That is the property worth pinning, because it is the
+// one a careless dependency bump could quietly reverse.
+func TestNoTelemetryIsLinked(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", "-tags", buildTags, "./...").Output()
+	if err != nil {
+		t.Skipf("cannot run go list: %v", err)
+	}
+	for _, banned := range []string{
+		"go.opentelemetry.io/otel/exporters", // anything that ships spans off-box
+		"go.opentelemetry.io/otel/sdk/trace", // the provider that would drive one
+		"github.com/getsentry/sentry-go",
+		"gopkg.in/segmentio/analytics-go",
+		"github.com/posthog/posthog-go",
+	} {
+		if strings.Contains(string(out), banned) {
+			t.Errorf("%s is linked into dbforge. DBForge sends nothing anywhere; "+
+				"if that is changing it must be opt-in and documented.", banned)
+		}
+	}
+}

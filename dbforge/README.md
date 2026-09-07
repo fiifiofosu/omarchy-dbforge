@@ -24,6 +24,7 @@ Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 - [Upgrading and uninstalling](#upgrading-and-uninstalling)
 - [Quick start](#quick-start)
 - [Commands](#commands)
+- [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
 - [Where things live](#where-things-live)
 - [Design decisions](#design-decisions)
@@ -250,6 +251,47 @@ testable by hand.
 
 ---
 
+### `dbctl doctor`
+
+The first thing to run when something does not work. It checks the rootless
+setup end to end -- podman, the socket, subuid/subgid ranges, the id-map
+helpers, cgroup delegation, the data directory, config permissions, port
+availability, the systemd unit, lingering, and the daemon -- and tells you what
+to do about anything it finds.
+
+```
+$ dbctl doctor
+[  ok  ] podman installed     /usr/bin/podman
+[  ok  ] podman socket        responding
+[  ok  ] running rootless     uid 1000
+[  ok  ] subuid range         65536 ids from 100000
+[  ok  ] subgid range         65536 ids from 100000
+[  ok  ] newuidmap/newgidmap  present
+[  ok  ] cgroup delegation    cpu memory pids
+[  ok  ] data directory       /home/you/.local/share/dbforge
+[  ok  ] config file          /home/you/.config/dbforge/instances.toml (952 bytes)
+[  ok  ] port range           64 of 64 probed ports free in 15000-15999 (sampled 64)
+[  ok  ] systemd unit         /home/you/.config/systemd/user/dbforged.service -> ...
+[  ok  ] user lingering       enabled
+[  ok  ] dbforged             responding on /run/user/1000/dbforge/dbforged.sock
+
+All checks passed.
+```
+
+Warnings never fail the command — lingering being off or cgroup controllers
+not being delegated are things DBForge works around, and failing on them would
+train you to ignore the output. A failure exits non-zero, so this is usable in
+a script or a bug report:
+
+```bash
+dbctl doctor --json > doctor.json
+```
+
+It changes nothing, so it is safe to run on a machine where nothing works —
+which is the only machine you will ever run it on.
+
+---
+
 ## The status bar widget
 
 ```bash
@@ -455,10 +497,11 @@ uninstalling DBForge never deletes a database.
 
 | Variable | Purpose |
 |---|---|
-| `DBFORGE_SOCKET` | Override the daemon socket path |
+| `DBFORGE_SOCKET` | Override the daemon socket path (both the daemon and the CLI) |
 | `DBFORGE_PODMAN_SOCKET` | Override the Podman socket |
 | `DBFORGE_DATA_ROOT` | Override where instance data is stored |
 | `DBFORGE_LOG_LEVEL` | `debug`, `info`, `warn`, `error` |
+| `DBFORGE_LOG_FORMAT` | `json` for machine-readable daemon logs; text by default |
 | `DBFORGE_SUPERVISE_INTERVAL` | How often to re-check instances (default `30s`) |
 | `DBFORGE_NO_RESTORE` | Set to skip restoring instances on daemon startup |
 | `DBFORGE_SCOPE` | Isolate this installation's containers from another on the same host |
@@ -704,14 +747,15 @@ probably under heavy load.
 | 4 | waybar module | ✅ done |
 | 4b | Quickshell module | ⬜ deferred (Omarchy 3.x is waybar-based) |
 | 5 | AUR packaging, upgrade and migration safety | ✅ done; package built and checked, not yet published |
-| 6 | `dbctl doctor`, structured logging, first tagged release | ⬜ partial (logging done) |
+| 6 | `dbctl doctor`, structured logging, telemetry guarantee | ✅ done |
 
 Full plan: [`docs/dbforge-omarchy-implementation-plan.md`](docs/dbforge-omarchy-implementation-plan.md).
 Phase notes: [`docs/phase-0-findings.md`](docs/phase-0-findings.md),
 [`docs/phase-2-notes.md`](docs/phase-2-notes.md),
 [`docs/phase-3-notes.md`](docs/phase-3-notes.md),
 [`docs/phase-4-notes.md`](docs/phase-4-notes.md),
-[`docs/phase-5-notes.md`](docs/phase-5-notes.md).
+[`docs/phase-5-notes.md`](docs/phase-5-notes.md),
+[`docs/phase-6-notes.md`](docs/phase-6-notes.md).
 
 ---
 

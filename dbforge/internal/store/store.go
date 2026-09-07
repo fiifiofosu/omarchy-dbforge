@@ -76,6 +76,29 @@ func DefaultPath() (string, error) {
 	return filepath.Join(dir, "dbforge", "instances.toml"), nil
 }
 
+// DefaultDataRoot is ~/.local/share/dbforge, honouring XDG_DATA_HOME and the
+// DBFORGE_DATA_ROOT override. Data lives outside anything a package manager
+// owns so uninstalling never deletes a database (spec 7, phase 5).
+//
+// It sits beside DefaultPath so the two path policies cannot drift: the daemon,
+// the CLI and `dbctl doctor` all have to agree on where state lives, and doctor
+// reporting a different directory from the one in use would be worse than no
+// check at all.
+func DefaultDataRoot() (string, error) {
+	if d := os.Getenv("DBFORGE_DATA_ROOT"); d != "" {
+		return d, nil
+	}
+	dir := os.Getenv("XDG_DATA_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dir, "dbforge"), nil
+}
+
 // Path returns the file this store manages.
 func (s *Store) Path() string { return s.path }
 

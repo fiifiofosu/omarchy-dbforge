@@ -20,6 +20,14 @@ import (
 // all speak to this one socket, which is what keeps the daemon the single
 // writer (spec 5).
 func SocketPath() string {
+	// DBFORGE_SOCKET is documented as overriding the socket path, and the CLI
+	// has always honoured it. The daemon ignoring it meant the two ends of the
+	// same override pointed at different files: `DBFORGE_SOCKET=x dbctl ls`
+	// would talk to x while `DBFORGE_SOCKET=x dbforged` listened on the
+	// default, and the only symptom was a connection refused.
+	if s := os.Getenv("DBFORGE_SOCKET"); s != "" {
+		return s
+	}
 	run := os.Getenv("XDG_RUNTIME_DIR")
 	if run == "" {
 		run = fmt.Sprintf("/run/user/%d", os.Getuid())
