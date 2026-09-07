@@ -73,14 +73,30 @@ published yet, so the AUR package below is built but not uploaded.
 ```bash
 git clone https://github.com/fiifiofosu/dbforge
 cd dbforge
-make install
-./packaging/install.sh
+make install && ./packaging/install.sh
+```
+
+That is the whole installation. There is no follow-up command:
+
+```bash
+dbctl create postgres:16 --name app-db
 ```
 
 `make install` puts a single binary under two names (`dbforged`, `dbctl`) into
 `~/.local/bin` and renders the systemd user unit for that location.
-`install.sh` then enables `podman.socket` and `dbforged`, and tells you if user
-lingering is off.
+`install.sh` enables and starts the daemon, and turns on user lingering — the
+one step that needs root, so it asks before running `sudo`. Pass `--yes` to
+skip the prompt or `--no-linger` to decline it.
+
+**`podman.socket` does not need enabling.** `dbforged.service` declares
+`Wants=podman.socket`, so starting the daemon starts the socket and enabling
+the daemon brings both up at login. Enabling it separately would only be a
+second thing to keep in step with the first.
+
+**Lingering is not optional in practice.** Without it your systemd user manager
+is torn down at logout, taking the daemon and every database with it, and
+nothing comes back until you log in again. It is what makes "the database you
+created is there tomorrow" true.
 
 A per-user unit in `~/.config/systemd/user/` overrides a packaged one of the
 same name. If you install from source and later install the package, remove the
@@ -104,24 +120,31 @@ You can still build and install it locally:
 packaging/aur/check.sh --install
 ```
 
-That installs to `/usr/bin`, puts the systemd user unit in
-`/usr/lib/systemd/user/`, and enables it for all users with `systemctl
---global enable`. Two things it deliberately does not do for you, because
-neither is a package's decision to make:
+That installs to `/usr/bin` and puts the systemd user unit in
+`/usr/lib/systemd/user/`. The package's post-install hook then does the setup
+itself, because pacman runs as root and so has exactly the privileges the
+remaining steps need:
 
-```bash
-systemctl --user enable --now podman.socket   # the daemon talks to this
-sudo loginctl enable-linger $USER             # so databases survive logout
-systemctl --user start dbforged
-```
+- enables `dbforged` for all users (`systemctl --global enable`),
+- turns on lingering for the user pacman was run for, so databases survive
+  logout,
+- starts the daemon in that user's session, so the install is usable now
+  rather than after a logout.
 
-To keep the service from being enabled — on install and on every future
-upgrade:
+Upgrades restart the daemon for you. That does not stop your databases — the
+unit owns only the daemon process, and on startup it reattaches to the
+containers already running.
+
+To keep the package's hands off your services entirely — on install and on
+every future upgrade:
 
 ```bash
 sudo mkdir -p /etc/dbforge && sudo touch /etc/dbforge/no-autoenable
 sudo systemctl --global disable dbforged.service
 ```
+
+With that marker present the hooks enable nothing, start nothing and restart
+nothing; an upgrade just tells you the new binaries are in place.
 
 ### A note on PATH
 
@@ -426,14 +449,18 @@ desired state. Two controllers with different information is one too many.
 ### Lingering
 
 For instances to survive **logout** and come back at **boot**, the systemd user
-manager has to keep running when you are not logged in:
+manager has to keep running when you are not logged in. Both installers turn
+this on for you — `packaging/install.sh` asks first, since it is the one step
+needing root, and the pacman hook does it directly because it already has root.
+
+If you declined it, or installed some other way:
 
 ```bash
 sudo loginctl enable-linger $USER
 ```
 
 Without it, your databases stop at logout and stay down until you next log in.
-`packaging/install.sh` checks this and tells you if it is missing.
+`dbctl doctor` warns when it is off.
 
 ## How it works
 
@@ -722,17 +749,18 @@ systemctl --user start dbforged
 ```
 
 **`connecting to podman ... connection refused`** — the Podman socket is not
-enabled:
+running. Normally starting the daemon starts it, since the unit `Wants=` it, so
+this usually means the daemon was started some other way:
 ```bash
-systemctl --user enable --now podman.socket
+systemctl --user start dbforged     # brings podman.socket up with it
 ```
 
 **An instance shows `exited(137)`** — it was killed rather than stopped
 cleanly (usually OOM). With `restart=always` the daemon brings it back within
 the supervision interval. For Postgres, expect crash recovery in `dbctl logs`.
 
-**Databases stop when I log out** — user lingering is off:
-`sudo loginctl enable-linger $USER`.
+**Databases stop when I log out** — user lingering is off. The installers
+enable it; if you declined, `sudo loginctl enable-linger $USER`.
 
 **An instance shows `missing(!)`** — its container was removed outside DBForge.
 Your data is untouched. `dbctl rm <id>` forgets the entry; recreating with the

@@ -167,3 +167,58 @@ seven minutes into a container build.
 | Release build stamps a real version | dry-run against a throwaway tag; both gates exercised |
 | The Arch package builds on clean Arch | reusable workflow, green on both PR and develop-push triggers |
 | The PKGBUILD cannot drift off the Makefile | `check.sh` greps it for direct go invocations |
+| `podman.socket` needs no separate enabling | disabled it, started `dbforged`, socket came up and an instance was created |
+| A fresh install needs no follow-up command | torn the unit down and reinstalled from scratch on this machine |
+| The hooks set up the invoking user, never root | hook test with `SUDO_USER=root` |
+| The opt-out stops enabling, starting and restarting | hook tests on all three paths |
+
+## Installation with no homework
+
+Both install paths ended with the same two lines:
+
+```
+systemctl --user enable --now podman.socket
+sudo loginctl enable-linger "$USER"
+```
+
+Printing those is asking someone to finish running the installer by hand. Each
+was reconsidered on its own.
+
+**`podman.socket` turned out to be unnecessary.** `dbforged.service` already
+declares `Wants=podman.socket`, which starts the socket whenever the daemon
+starts. Verified rather than assumed: with `podman.socket` explicitly
+*disabled*, starting `dbforged` brought it to `active`, and creating a Postgres
+instance worked normally. The instruction had been redundant since the unit was
+written in Phase 2 — enabling it separately only added a second thing to keep
+in step with the first. Removed from both installers and from the docs.
+
+**Lingering genuinely needs root**, so it is done where root already is:
+
+- `packaging/install.sh` runs as the user, so it asks before `sudo` — the one
+  prompt in the install, with `--yes` to skip it and `--no-linger` to decline.
+  It refuses to hang on a password prompt when there is no terminal to answer
+  it, which is the difference between a script that fails and one that appears
+  to freeze.
+- The pacman hook runs *as* root and so simply does it, for the user pacman was
+  invoked on behalf of (`SUDO_USER`, falling back to `logname`). It also starts
+  the daemon in that user's session via `systemctl --machine=user@.host`, so
+  the install is usable immediately rather than after a logout, and on upgrade
+  it restarts the daemon rather than telling you to.
+
+Restarting on upgrade is safe for the same reason the Phase 5 test asserts:
+`KillMode=process` means the unit owns only the daemon, and on startup it
+reattaches to containers already running.
+
+### What the opt-out means
+
+The hook test caught a design question that had been answered by accident:
+`post_upgrade` restarted the daemon even when `/etc/dbforge/no-autoenable` was
+present. The marker had been about *enabling*, and restarting slipped through
+because it was written later.
+
+Someone who asks a package not to manage their service means all of it, not
+just the parts that are inconvenient to skip. The marker now gates enabling,
+starting and restarting alike; with it present an upgrade only reports that new
+binaries are in place. There are tests for each of those paths, and one
+asserting the hook never sets *root* up — a package that enabled lingering for
+root would be both useless and rude.
