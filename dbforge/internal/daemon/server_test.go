@@ -283,3 +283,66 @@ func TestNonStreamingCreateStillReturnsPlainJSON(t *testing.T) {
 		t.Fatalf("got %q, want plain", inst.ID)
 	}
 }
+
+// The shutdown endpoint is the one that takes the daemon down with it, so it
+// has to answer before it goes: a client that is told nothing cannot tell a
+// completed shutdown from a dropped connection.
+func TestAPIShutdownStopsInstancesAndThenTheDaemon(t *testing.T) {
+	fake := runtime.NewFake()
+	dir := t.TempDir()
+	m := NewManager(fake, store.New(filepath.Join(dir, "instances.toml")), Config{
+		DataRoot: filepath.Join(dir, "data"),
+		Probe:    func(int) error { return nil },
+	})
+	if _, err := m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(m, testLogger())
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	for _, ref := range []string{"postgres:16", "redis:7"} {
+		body := strings.NewReader(`{"Ref":"` + ref + `","Start":true}`)
+		resp, err := http.Post(srv.URL+"/instances", "application/json", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	resp, err := http.Post(srv.URL+"/shutdown", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("shutdown status = %d, want 200", resp.StatusCode)
+	}
+	var rep SuspendReport
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		t.Fatalf("shutdown answered nothing decodable: %v", err)
+	}
+	if len(rep.Stopped) != 2 {
+		t.Fatalf("stopped %v, want both instances", rep.Stopped)
+	}
+
+	// And only then does it ask to exit.
+	select {
+	case <-s.Quit():
+	default:
+		t.Fatal("shutdown replied but never asked the daemon to exit")
+	}
+
+	list, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range list {
+		if i.Status == model.StatusRunning {
+			t.Errorf("%s still running after shutdown", i.ID)
+		}
+		if !i.Suspended {
+			t.Errorf("%s was not marked suspended, so it will not come back", i.ID)
+		}
+	}
+}

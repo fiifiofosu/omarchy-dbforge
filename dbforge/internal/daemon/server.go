@@ -330,6 +330,10 @@ func errKind(err error) string {
 	return ""
 }
 
+// Quit is closed once a client has asked the daemon to shut down and the
+// instances have been stopped. Serve returns on it; main exits 0.
+func (s *Server) Quit() <-chan struct{} { return s.quit }
+
 // handleShutdown stops every running instance and then the daemon itself.
 //
 // The reply is sent before the process goes away: the client asked what
