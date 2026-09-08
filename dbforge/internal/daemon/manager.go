@@ -66,9 +66,24 @@ type Manager struct {
 	notify *notify.Notifier
 	clock  func() time.Time
 
-	// mu guards the instances map itself.
+	// mu guards the instances map itself, and gen.
 	mu        sync.Mutex
 	instances map[string]*model.Instance
+	// gen counts state changes. Reconcile builds its view from the config
+	// file and Podman, both read at the start of a pass; if a create, removal
+	// or transition commits while that pass is in flight, the view is already
+	// stale and writing it back would undo the change. That is how a
+	// destroyed instance reappeared as "missing" on the next refresh: the
+	// TUI polls List -- and so Reconcile -- every two seconds, which is a
+	// wide enough window to overlap a destroy. A pass that sees gen move
+	// between its first read and its commit is therefore discarded.
+	gen uint64
+	// inflight counts mutations that have started and not finished. A
+	// multi-step mutation -- Suspend stopping four databases in turn -- holds
+	// state in memory between its steps, and a pass that commits in the middle
+	// of one would drop whatever it had recorded so far without gen moving at
+	// all. So a pass also discards itself if any mutation is under way.
+	inflight int
 	// locks serialises mutations per instance id, so two dbctl calls racing
 	// on the same instance queue rather than interleave (spec 7, phase 2).
 	locks map[string]*sync.Mutex
@@ -90,6 +105,21 @@ func NewManager(rt runtime.Runtime, st *store.Store, cfg Config) *Manager {
 		clock:     time.Now,
 		instances: map[string]*model.Instance{},
 		locks:     map[string]*sync.Mutex{},
+	}
+}
+
+// mutating marks the start of an operation that changes instance state, and
+// returns the function that ends it. Every mutation is bracketed by this, so
+// reconciliation can tell that its view of the world is already out of date.
+func (m *Manager) mutating() func() {
+	m.mu.Lock()
+	m.gen++
+	m.inflight++
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		m.inflight--
+		m.mu.Unlock()
 	}
 }
 
@@ -130,6 +160,10 @@ type ReconcileReport struct {
 //     create died partway. Prune it so the id and port are reusable.
 func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	var rep ReconcileReport
+
+	m.mu.Lock()
+	startGen := m.gen
+	m.mu.Unlock()
 
 	persisted, err := m.st.Load()
 	if err != nil {
@@ -210,6 +244,15 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	sort.Strings(rep.Unclean)
 
 	m.mu.Lock()
+	if m.gen != startGen || m.inflight > 0 {
+		// Something changed under us: a destroy, a create, a stop. Our view
+		// predates it, so it is the stale one -- drop it rather than write it
+		// back. Whatever committed has already saved its own state, and the
+		// next pass reads the world afresh.
+		m.mu.Unlock()
+		m.log.Debug("discarding reconcile pass overtaken by a state change")
+		return ReconcileReport{}, nil
+	}
 	m.instances = next
 	m.mu.Unlock()
 
@@ -296,6 +339,10 @@ func (m *Manager) save(force bool) error {
 	for _, i := range m.instances {
 		out = append(out, *i)
 	}
+	// Hooked here for the same reason as the notification below: every state
+	// change ends in a save, so no future action can forget to announce that
+	// an in-flight Reconcile is now working from a stale view.
+	m.gen++
 	m.mu.Unlock()
 
 	err := m.st.Save(out, force)
@@ -464,7 +511,11 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 
 	// Record the intent before doing anything destructive or slow. If we die
 	// after this point, Reconcile finds a "creating" entry with no container
-	// and prunes it.
+	// and prunes it -- which is also why the create must be bracketed: a
+	// reconcile pass that lands mid-create would see exactly that entry and
+	// prune an instance being built.
+	defer m.mutating()()
+
 	m.mu.Lock()
 	m.instances[inst.ID] = &inst
 	m.mu.Unlock()
@@ -473,17 +524,27 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 		return model.Instance{}, err
 	}
 
-	// 0o700: the data directory holds the database. Rootless Podman maps our
-	// UID to root inside the container, so the engine sees it as its own.
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	// Rootless Podman maps our UID to root inside the container, so the engine
+	// sees the directory as its own. The mode is the engine's to choose: 0o700
+	// unless it reaches its data as an unprivileged user below the mount
+	// point, which needs traversal (Postgres 18+).
+	mode := eng.HostDirModeFor(version)
+	if err := os.MkdirAll(dataDir, mode); err != nil {
 		m.rollback(inst.ID)
 		return model.Instance{}, fmt.Errorf("creating data directory %s: %w", dataDir, err)
+	}
+	// MkdirAll leaves an existing directory's mode alone, and umask can strip
+	// bits from a new one -- but the engine needs exactly this mode, whether
+	// the directory is new or kept from an instance destroyed with --keep-data.
+	if err := os.Chmod(dataDir, mode); err != nil {
+		m.rollback(inst.ID)
+		return model.Instance{}, fmt.Errorf("setting mode on data directory %s: %w", dataDir, err)
 	}
 
 	spec := runtime.CreateSpec{
 		Name: inst.ContainerName(), Image: image, Env: inst.Env,
 		Labels: inst.Labels(), HostPort: port, ContainerPort: eng.ContainerPort,
-		HostDataDir: dataDir, ContainerDataDir: eng.DataPath,
+		HostDataDir: dataDir, ContainerDataDir: eng.DataPathFor(version),
 		MemoryLimitBytes: opt.MemoryLimitBytes, NanoCPUs: opt.NanoCPUs,
 		TZ:              os.Getenv("TZ"),
 		StopTimeoutSecs: eng.StopTimeoutSecs,
@@ -551,6 +612,9 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 		inst.Status = model.StatusRunning
 		inst.Desired = model.DesiredRunning
 		inst.LastExitCode = 0
+		// Running again, however it got here: the shutdown that stopped it has
+		// been undone and must not be undone twice.
+		inst.Suspended = false
 		return nil
 	})
 }
@@ -571,6 +635,8 @@ func (m *Manager) RestartInstance(ctx context.Context, id string, timeoutSecs ui
 		return fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
 	}
 
+	defer m.mutating()()
+
 	name := inst.ContainerName()
 	if err := m.rt.Stop(ctx, name, m.stopTimeoutFor(*inst, timeoutSecs)); err != nil {
 		if errors.Is(err, runtime.ErrNotFound) {
@@ -589,6 +655,7 @@ func (m *Manager) RestartInstance(ctx context.Context, id string, timeoutSecs ui
 	inst.Status = model.StatusRunning
 	inst.Desired = model.DesiredRunning
 	inst.LastExitCode = 0
+	inst.Suspended = false
 	return m.save(false)
 }
 
@@ -622,6 +689,10 @@ func (m *Manager) Stop(ctx context.Context, id string, timeoutSecs uint) error {
 		// An explicit stop is a durable decision: it must survive a reboot,
 		// so nothing auto-starts this instance again until the user says so.
 		inst.Desired = model.DesiredStopped
+		// This stop is the user's, which supersedes any earlier shutdown of
+		// ours -- otherwise quitting and relaunching would start a database
+		// they had just stopped by hand.
+		inst.Suspended = false
 		return nil
 	})
 }
@@ -637,6 +708,8 @@ func (m *Manager) transition(ctx context.Context, id string, fn func(*model.Inst
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
 	}
+
+	defer m.mutating()()
 
 	err := fn(inst)
 	if saveErr := m.save(false); saveErr != nil && err == nil {
@@ -667,6 +740,8 @@ func (m *Manager) Remove(ctx context.Context, id string, opt RemoveOptions) erro
 		return fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
 	}
 
+	defer m.mutating()()
+
 	err := m.rt.Remove(ctx, inst.ContainerName(), opt.Force)
 	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		// Podman refuses to remove a running container, and says so in terms
@@ -681,6 +756,10 @@ func (m *Manager) Remove(ctx context.Context, id string, opt RemoveOptions) erro
 
 	// Only after the container is gone do we consider the data. Deleting data
 	// while a container still holds it would be the worst possible ordering.
+	//
+	// A failed wipe keeps the entry rather than dropping it: the data is
+	// still on disk, and an instance the user can see is easier to deal with
+	// than an orphaned directory they have to be told about.
 	if opt.WipeData {
 		if inst.DataDir == "" || !filepath.IsAbs(inst.DataDir) {
 			return fmt.Errorf("refusing to wipe suspicious data dir %q", inst.DataDir)
@@ -688,6 +767,12 @@ func (m *Manager) Remove(ctx context.Context, id string, opt RemoveOptions) erro
 		// Delegated to the runtime, not os.RemoveAll: under rootless Podman
 		// the engine's files are owned by a subuid we cannot unlink directly.
 		if err := m.rt.RemovePath(ctx, inst.DataDir); err != nil {
+			// Logged as well as returned: the container is already gone, so
+			// this leaves an instance that cannot start, and the reason for
+			// that state belongs in the daemon log rather than only in the
+			// reply to whoever asked.
+			m.log.Error("failed to wipe instance data",
+				"id", id, "dir", inst.DataDir, "error", err)
 			return fmt.Errorf("removing data directory: %w", err)
 		}
 		m.log.Warn("wiped instance data", "id", id, "dir", inst.DataDir)
@@ -710,22 +795,33 @@ func (m *Manager) Logs(ctx context.Context, id string, follow bool, tail int, w 
 
 // ConnString returns a ready-to-use connection string for an instance.
 func (m *Manager) ConnString(id string) (string, error) {
+	conn, _, err := m.Credentials(id)
+	return conn, err
+}
+
+// Credentials returns an instance's connection string and its password.
+//
+// The password is deliberately not part of the instance list: Instance.Env
+// carries `json:"-"` so that `dbctl list --json`, which people paste into
+// issues and pipe into scripts, cannot spill every database password at once.
+// Asking for one instance's credentials is an explicit act, and this is the
+// one endpoint that answers it.
+func (m *Manager) Credentials(id string) (conn, password string, err error) {
 	inst, err := m.Get(id)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	eng, err := engines.Get(inst.Engine)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	pw := ""
 	for _, k := range []string{"POSTGRES_PASSWORD", "MYSQL_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD"} {
 		if v, ok := inst.Env[k]; ok {
-			pw = v
+			password = v
 			break
 		}
 	}
-	return eng.ConnString(inst.Port, pw), nil
+	return eng.ConnString(inst.Port, password), password, nil
 }
 
 // isRunningErr reports whether a removal failed only because the container is
@@ -875,4 +971,74 @@ func generatePassword() (string, error) {
 		return "", fmt.Errorf("generating password: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// SuspendReport says what Suspend stopped.
+type SuspendReport struct {
+	Stopped []string
+	Failed  map[string]string
+}
+
+// Suspend stops every running instance, leaving desired state untouched.
+//
+// This is what quitting DBForge does: the user asked for the application to be
+// gone -- daemon and databases both -- but not to have decided that each of
+// those databases should stay stopped. Manager.Stop is the wrong tool for that
+// because it records a deliberate stop, which would mean nothing came back on
+// the next launch. Suspend leaves the intent alone, so Restore starts exactly
+// what was running when DBForge was last quit.
+func (m *Manager) Suspend(ctx context.Context) (SuspendReport, error) {
+	rep := SuspendReport{Failed: map[string]string{}}
+
+	if _, err := m.Reconcile(ctx); err != nil {
+		// Worth continuing: a reconcile failure means our view may be stale,
+		// but stopping what we believe is running is still the right move.
+		m.log.Warn("reconcile before suspend failed", "error", err)
+	}
+
+	defer m.mutating()()
+
+	m.mu.Lock()
+	running := make([]model.Instance, 0, len(m.instances))
+	for _, i := range m.instances {
+		if i.Status == model.StatusRunning {
+			running = append(running, *i)
+		}
+	}
+	m.mu.Unlock()
+
+	sort.Slice(running, func(a, b int) bool { return running[a].ID < running[b].ID })
+
+	for _, inst := range running {
+		lock := m.lockFor(inst.ID)
+		lock.Lock()
+		err := m.rt.Stop(ctx, inst.ContainerName(), m.stopTimeoutFor(inst, 0))
+		m.mu.Lock()
+		if cur, ok := m.instances[inst.ID]; ok {
+			switch {
+			case err == nil:
+				cur.Status = model.StatusStopped
+				// Remember that this stop was ours, not the user's, so the
+				// next launch can undo it whatever the restart policy says.
+				cur.Suspended = true
+			case errors.Is(err, runtime.ErrNotFound):
+				cur.Status = model.StatusMissing
+			}
+		}
+		m.mu.Unlock()
+		lock.Unlock()
+
+		switch {
+		case err == nil:
+			rep.Stopped = append(rep.Stopped, inst.ID)
+		case errors.Is(err, runtime.ErrNotFound):
+			// Already gone. Nothing to stop and nothing to report as failed.
+		default:
+			rep.Failed[inst.ID] = err.Error()
+			m.log.Error("failed to stop instance during shutdown",
+				"id", inst.ID, "error", err)
+		}
+	}
+
+	return rep, m.save(false)
 }

@@ -105,6 +105,13 @@ type Instance struct {
 	// ContainerID is Podman's ID for the container backing this instance.
 	ContainerID string `json:"container_id" toml:"container_id"`
 
+	// Suspended marks an instance that was running when DBForge was last shut
+	// down and was stopped only because of that. It is what makes quitting the
+	// app reversible: on the next launch these come back regardless of restart
+	// policy, because the user never asked for them to be stopped -- they
+	// asked for DBForge to go away. An explicit start or stop clears it.
+	Suspended bool `json:"suspended,omitempty" toml:"suspended,omitempty"`
+
 	// Scope isolates one DBForge installation from another on the same host.
 	// Containers are found by label, so without this a second daemon -- a test
 	// run, or a throwaway config -- would adopt the containers belonging to
@@ -141,6 +148,12 @@ func (i Instance) Labels() map[string]string {
 func (i Instance) ShouldAutoStart() bool {
 	if i.Desired != DesiredRunning {
 		return false
+	}
+	// Stopped by a shutdown, not by the user. Restart policy governs what
+	// happens when an instance dies unexpectedly, which this was not: putting
+	// back what quitting took away is not a policy decision.
+	if i.Suspended {
+		return true
 	}
 	switch i.Restart {
 	case RestartAlways:

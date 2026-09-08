@@ -91,6 +91,11 @@ install: build dist/dbforged.service
 		$(DESTDIR)$(PREFIX)/share/dbforge/waybar/style.css
 	install -Dm755 packaging/waybar/install.sh \
 		$(DESTDIR)$(PREFIX)/share/dbforge/waybar/install.sh
+	install -Dm755 packaging/desktop/dbforge-app $(DESTDIR)$(BINDIR)/dbforge-app
+	install -Dm644 packaging/desktop/dbforge.desktop \
+		$(DESTDIR)$(PREFIX)/share/applications/dbforge.desktop
+	install -Dm644 packaging/desktop/dbforge.svg \
+		$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/dbforge.svg
 	install -Dm644 README.md $(DESTDIR)$(PREFIX)/share/doc/dbforge/README.md
 	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/dbforge/LICENSE
 	@[ -n "$(DESTDIR)" ] || $(MAKE) --no-print-directory post-install-notes
@@ -110,7 +115,9 @@ uninstall:
 	-systemctl --user disable --now dbforged 2>/dev/null
 	rm -f $(BINDIR)/dbforge $(BINDIR)/dbforge-tui \
 		$(BINDIR)/dbforged $(BINDIR)/dbctl \
-		$(BINDIR)/dbforge-waybar-menu
+		$(BINDIR)/dbforge-waybar-menu $(BINDIR)/dbforge-app
+	rm -f $(PREFIX)/share/applications/dbforge.desktop
+	rm -f $(PREFIX)/share/icons/hicolor/scalable/apps/dbforge.svg
 	rm -f $(UNITDIR)/dbforged.service
 	rm -rf $(PREFIX)/share/dbforge
 	-systemctl --user daemon-reload 2>/dev/null

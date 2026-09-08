@@ -28,6 +28,11 @@ import (
 //	0  Pre-versioned. No schema_version key. Instances have no restart
 //	   policy, desired state or scope; the daemon fills those in.
 //	1  Current. schema_version, restart, desired and scope are present.
+//	   The optional "suspended" key was added later within this version: it is
+//	   additive and defaults to false, so an older build reading a newer file
+//	   simply ignores it and loses nothing but the auto-resume after a
+//	   shutdown. That does not warrant a bump, which would make every older
+//	   build refuse the file outright.
 //
 // Adding a version means adding a case to migrate() and a round-trip test
 // that starts from a real file written by the older build.

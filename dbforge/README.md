@@ -83,10 +83,19 @@ dbctl create postgres:16 --name app-db
 ```
 
 `make install` puts a single binary under two names (`dbforged`, `dbctl`) into
-`~/.local/bin` and renders the systemd user unit for that location.
+`~/.local/bin`, renders the systemd user unit for that location, and installs a
+desktop entry so DBForge appears in your application launcher.
 `install.sh` enables and starts the daemon, and turns on user lingering — the
 one step that needs root, so it asks before running `sudo`. Pass `--yes` to
 skip the prompt or `--no-linger` to decline it.
+
+**DBForge shows up in your application launcher.** The desktop entry runs
+`dbforge-app`, a launcher that opens the TUI in a terminal — `$TERMINAL` if you
+have set one, then `xdg-terminal-exec`, then the usual emulators. It picks the
+terminal itself rather than relying on `Terminal=true`, which Wayland launchers
+honour inconsistently; one that ignores it starts a TUI with no terminal, which
+looks exactly like the application failing. Launching the app also starts the
+daemon if it is not running, which is what makes quitting DBForge reversible.
 
 **`podman.socket` does not need enabling.** `dbforged.service` declares
 `Wants=podman.socket`, so starting the daemon starts the socket and enabling
@@ -160,7 +169,18 @@ path for the same reason.
 
 ### Upgrading
 
-An upgrade replaces the binaries; picking them up means restarting the daemon:
+From inside the app: press `u` in the TUI, or run
+
+```bash
+dbctl update          # --check reports without installing
+```
+
+That downloads the newest release's binaries, verifies them against the
+release's own `SHA256SUMS` before replacing anything, and restarts the daemon.
+It refuses to touch a packaged install and prints the pacman command instead.
+
+By hand, an upgrade replaces the binaries; picking them up means restarting the
+daemon:
 
 ```bash
 systemctl --user restart dbforged
@@ -248,6 +268,8 @@ dbctl logs <id> [--follow] [--tail N]
 dbctl conn <id>
 dbctl restart-policy <id> <no|on-failure|always>
 dbctl restore
+dbctl shutdown
+dbctl update [--check]
 dbctl engines
 ```
 
@@ -255,6 +277,19 @@ dbctl engines
 if needed and starts the container. `--port` pins a specific port (useful for
 claiming the conventional 5432); it fails loudly rather than silently picking
 another if that port is taken.
+
+**`shutdown`** stops every running instance and then the daemon: after it,
+nothing of DBForge is running. Instances that were running are marked as
+suspended rather than stopped, so the next launch brings back exactly what was
+up -- whatever each one's restart policy says. This is what the TUI's `q` does.
+
+**`update`** installs the newest published release over this installation: it
+compares the running version against the newest GitHub release, downloads the
+binaries and the release's `SHA256SUMS`, verifies every file before replacing
+anything, and restarts the daemon. `--check` reports without installing. A
+packaged install (anything under `/usr`) is refused with the pacman command
+that would do it properly, because replacing a package manager's files leaves
+its database lying about what is on disk.
 
 **`list --json`** is the scripting surface, and what the Phase 4 waybar module
 will consume. It always emits a JSON array, never `null`, so consumers can tell
@@ -412,12 +447,29 @@ A full-screen view of every instance, with actions on the selected row.
 ```
 DBForge  local database instances
 
-  ID               ENGINE    VERSION  PORT   STATUS      RESTART    UPTIME
-> app-db           postgres  16       15432  running     always     2h14m
-  cache            redis     7        15379  stopped     no         -
+  ID               ENGINE    VERSION  HOST       PORT   DATABASE   PASSWORD                          STATUS      RESTART    UPTIME
+> app-db           postgres  16       127.0.0.1  15432  postgres   xK2p_9vQm4TzR7bN1sW8eL3dY6cF0aHu  running     always     2h14m
+  cache            redis     7        127.0.0.1  15379  0          -                                 stopped     no         -
 
-s start/stop   R restart   l logs   c connection   n new   d destroy   r refresh   q quit
+s start/stop   R restart   l logs   c connection   n new   d destroy   u update   r refresh   q quit
 ```
+
+The columns spell out the whole connection: host, port, database and password
+are everything a client needs, and `c` still shows the assembled string for
+copying. Narrow terminals drop columns from the right of usefulness inward
+(restart, then uptime, then version and engine) rather than wrapping the row;
+the id, port and status never go, and password is the last to go -- it is shown
+whole or not at all, since a truncated password can neither be copied nor
+checked.
+
+Passwords are fetched one instance at a time, not with the list: `list --json`
+carries no passwords, so nothing that dumps every instance dumps every password
+with it. A cell reads `...` until its fetch lands, and `-` for an engine that
+takes no password.
+
+`DATABASE` is the engine's own answer, not a guess: Postgres creates a database
+named after the superuser, Redis numbers its databases and starts on 0, and
+MySQL and MariaDB have none until a client creates one, which shows as `-`.
 
 | Key | Action |
 |---|---|
@@ -428,8 +480,15 @@ s start/stop   R restart   l logs   c connection   n new   d destroy   r refresh
 | `c` | Show the connection string |
 | `n` | Create a new instance (guided) |
 | `d` | Destroy it |
+| `u` | Check for and install an update |
 | `r` | Refresh now |
-| `q` | Quit |
+| `q` | Quit DBForge (stops the databases and the daemon) |
+
+**Quitting** shuts the whole application down -- every running database and the
+daemon behind them -- after listing what it is about to stop. That is what the
+`w` option on the confirmation is for: it closes the window and leaves
+everything running, which is what closing a window usually means. Starting
+DBForge again brings back exactly the databases that were running.
 
 **Creating** walks engine → version → name → port → restart policy. The version
 list comes from Docker Hub, filtered to plain version tags and sorted newest
@@ -635,7 +694,7 @@ wrong, so the destructive path is deliberately awkward:
 
 | Engine | Image | Default port base | Data path in container |
 |---|---|---|---|
-| `postgres` | `docker.io/library/postgres` | 5433 | `/var/lib/postgresql/data` |
+| `postgres` | `docker.io/library/postgres` | 5433 | `/var/lib/postgresql` (18+), `/var/lib/postgresql/data` (≤ 17) |
 | `mysql` | `docker.io/library/mysql` | 3307 | `/var/lib/mysql` |
 | `mariadb` | `docker.io/library/mariadb` | 3317 | `/var/lib/mysql` |
 | `redis` | `docker.io/library/redis` | 6380 | `/data` |

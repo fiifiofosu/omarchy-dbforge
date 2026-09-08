@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=DBForge
+GenericName=Database Manager
+Comment=Local database instances, backed by rootless Podman
+# Not Terminal=true: launchers on a Wayland session (walker, wofi, rofi) vary in
+# whether they honour it, and one that does not silently runs a TUI with no
+# terminal attached -- which looks like the application failing to start. The
+# launcher script picks a terminal itself and is explicit about the failure
+# when there is none.
+Exec=dbforge-app
+Terminal=false
+Icon=dbforge
+Categories=Development;Database;
+Keywords=database;postgres;postgresql;mysql;mariadb;redis;podman;sql;
+StartupNotify=true
+StartupWMClass=dbforge

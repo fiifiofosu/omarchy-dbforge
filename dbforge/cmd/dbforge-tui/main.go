@@ -9,8 +9,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/fiifiofosu/dbforge/internal/cli"
 	"github.com/fiifiofosu/dbforge/internal/tui"
@@ -24,7 +26,23 @@ func main() {
 	// what a window left open across an upgrade looks like.
 	tui.Version = version
 
-	if err := tui.Run(cli.NewClient(os.Getenv("DBFORGE_SOCKET"))); err != nil {
+	socket := os.Getenv("DBFORGE_SOCKET")
+
+	// Quitting DBForge stops the daemon along with the databases, so launching
+	// it has to bring the daemon back -- otherwise the second launch of the
+	// application finds nothing running. A daemon that is already up costs one
+	// connect here.
+	//
+	// A failure is not fatal: the list screen reports an unreachable daemon
+	// clearly, and that is a better place to see the problem than a message
+	// printed before the terminal is even set up.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if err := cli.EnsureDaemon(ctx, socket); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	cancel()
+
+	if err := tui.Run(cli.NewClient(socket)); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

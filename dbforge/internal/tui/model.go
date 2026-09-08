@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,8 @@ const (
 	viewCreate
 	viewConfirmDestroy
 	viewConnection
+	viewQuit
+	viewUpdate
 )
 
 // refreshInterval is how often the list re-polls the daemon. Frequent enough
@@ -57,10 +60,20 @@ type Model struct {
 	// this process predates an upgrade and is running superseded code.
 	daemonVersion string
 
+	// passwords caches each instance's password by id. They are fetched one
+	// instance at a time -- the list response carries none -- and a generated
+	// password never changes, so this is filled once per instance and kept.
+	passwords map[string]string
+
 	logs    logsModel
 	create  createModel
 	destroy destroyModel
 	conn    connModel
+
+	// shutdown is what the quit screen is doing: nil until q is pressed.
+	shutdown *shutdownState
+	// update is the update screen's state: nil until u is pressed.
+	update *updateState
 }
 
 // New builds the root model.
@@ -75,10 +88,11 @@ var Version = "dev"
 
 func New(c *cli.Client) Model {
 	return Model{
-		client:   c,
-		registry: registry.New(),
-		view:     viewList,
-		create:   newCreateModel(),
+		client:    c,
+		registry:  registry.New(),
+		view:      viewList,
+		create:    newCreateModel(),
+		passwords: map[string]string{},
 	}
 }
 
@@ -118,6 +132,13 @@ type actionDoneMsg struct {
 	verb string
 	id   string
 	err  error
+}
+
+// passwordMsg carries one instance's password back to the list.
+type passwordMsg struct {
+	id       string
+	password string
+	err      error
 }
 
 type connStringMsg struct {
@@ -161,6 +182,48 @@ func (m Model) fetchConnString(id string) tea.Cmd {
 		defer cancel()
 		s, err := c.ConnString(ctx, id)
 		return connStringMsg{id: id, str: s, err: err}
+	}
+}
+
+// fetchMissingPasswords fetches the password of every instance whose password
+// is not cached yet.
+//
+// One request per instance, once per instance: passwords are not in the list
+// response, and a generated password never changes. Instances that have been
+// destroyed are dropped from the cache at the same time, so it cannot grow
+// without bound in a window left open for days.
+func (m *Model) fetchMissingPasswords() tea.Cmd {
+	live := make(map[string]bool, len(m.instances))
+	var cmds []tea.Cmd
+	for _, inst := range m.instances {
+		live[inst.ID] = true
+		eng, err := engines.Get(inst.Engine)
+		if err != nil || !eng.NeedsPassword {
+			continue
+		}
+		if _, known := m.passwords[inst.ID]; known {
+			continue
+		}
+		cmds = append(cmds, m.fetchPassword(inst.ID))
+	}
+	for id := range m.passwords {
+		if !live[id] {
+			delete(m.passwords, id)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m Model) fetchPassword(id string) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, pw, err := c.Credentials(ctx, id)
+		return passwordMsg{id: id, password: pw, err: err}
 	}
 }
 
@@ -218,6 +281,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = max(0, len(m.instances)-1)
 			}
 		}
+		return m, m.fetchMissingPasswords()
+
+	case passwordMsg:
+		if msg.err != nil {
+			// Nothing to say: the column already reads as "not known yet",
+			// and a database whose password cannot be fetched has a louder
+			// problem than a missing cell.
+			return m, nil
+		}
+		if m.passwords == nil {
+			m.passwords = map[string]string{}
+		}
+		m.passwords[msg.id] = msg.password
 		return m, nil
 
 	case actionDoneMsg:
@@ -254,6 +330,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.create.spinFrame++
 		return m, spinTick()
+
+	case updateCheckedMsg, updateProgressMsg, updateAppliedMsg:
+		next, cmd, _ := m.applyUpdateMessages(msg)
+		return next, cmd
+
+	case shutdownDoneMsg:
+		if msg.err != nil {
+			// The daemon going away without answering means the shutdown
+			// happened -- it does not get that far and then change its mind.
+			// Anything else is a real failure the user must see.
+			var down *cli.ErrDaemonUnreachable
+			if !errors.As(msg.err, &down) {
+				m.shutdown.working = false
+				m.shutdown.err = msg.err
+				return m, nil
+			}
+		}
+		m.quitting = true
+		m.logs.stop()
+		return m, tea.Quit
 
 	case staleMsg:
 		m.daemonVersion = msg.daemon
@@ -307,6 +403,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.view = viewList
 		}
 		return m, nil
+	case viewQuit:
+		return m.updateQuit(msg)
+	case viewUpdate:
+		return m.updateUpdate(msg)
 	default:
 		return m.updateList(msg)
 	}
@@ -315,8 +415,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
-		m.quitting = true
-		return m, tea.Quit
+		m.shutdown = &shutdownState{running: m.runningIDs()}
+		m.view = viewQuit
+		return m, nil
+
+	case "u":
+		return m.startUpdate()
 
 	case "up", "k":
 		if m.cursor > 0 {
@@ -393,6 +497,10 @@ func (m Model) View() string {
 		return m.viewDestroy()
 	case viewConnection:
 		return m.viewConnection()
+	case viewQuit:
+		return m.viewQuit()
+	case viewUpdate:
+		return m.viewUpdate()
 	default:
 		return m.viewList()
 	}
@@ -435,9 +543,8 @@ func (m Model) viewList() string {
 		return b.String()
 	}
 
-	b.WriteString(styleHeader.Render(fmt.Sprintf(
-		"  %-16s %-9s %-8s %-6s %-11s %-10s %s",
-		"ID", "ENGINE", "VERSION", "PORT", "STATUS", "RESTART", "UPTIME")))
+	cols := visibleColumns(m.width, m.passwords)
+	b.WriteString(renderHeader(cols))
 	b.WriteString("\n")
 
 	for i, inst := range m.instances {
@@ -447,17 +554,8 @@ func (m Model) viewList() string {
 			cursor = styleSelected.Render("> ")
 			rowStyle = styleSelected
 		}
-
-		status := statusLabel(inst)
-		line := fmt.Sprintf("%-16s %-9s %-8s %-6d ",
-			truncate(inst.ID, 16), truncate(inst.Engine, 9),
-			truncate(inst.Version, 8), inst.Port)
-
 		b.WriteString(cursor)
-		b.WriteString(rowStyle.Render(line))
-		b.WriteString(statusStyle(status).Render(fmt.Sprintf("%-11s", status)))
-		b.WriteString(rowStyle.Render(fmt.Sprintf(" %-10s %s",
-			string(inst.Restart), uptimeLabel(inst))))
+		b.WriteString(renderRow(cols, inst, rowStyle))
 		b.WriteString("\n")
 	}
 
@@ -472,7 +570,7 @@ func (m Model) viewList() string {
 	}
 
 	b.WriteString(styleHelp.Render(
-		"s start/stop   R restart   l logs   c connection   n new   d destroy   r refresh   q quit"))
+		"s start/stop   R restart   l logs   c connection   n new   d destroy   u update   r refresh   q quit"))
 	return b.String()
 }
 
