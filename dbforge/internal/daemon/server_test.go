@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiifiofosu/dbforge/internal/model"
 	"github.com/fiifiofosu/dbforge/internal/ports"
@@ -326,10 +327,13 @@ func TestAPIShutdownStopsInstancesAndThenTheDaemon(t *testing.T) {
 		t.Fatalf("stopped %v, want both instances", rep.Stopped)
 	}
 
-	// And only then does it ask to exit.
+	// And then it asks to exit. Waiting rather than peeking: the client is
+	// released as soon as the response is written, which is deliberately
+	// *before* the handler signals the exit -- so a non-blocking check here
+	// races with the handler's last two statements.
 	select {
 	case <-s.Quit():
-	default:
+	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown replied but never asked the daemon to exit")
 	}
 
