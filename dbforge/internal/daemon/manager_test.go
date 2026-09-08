@@ -416,3 +416,164 @@ func TestRemoveRunningGivesActionableError(t *testing.T) {
 		}
 	}
 }
+
+// A reconcile pass reads the config file and Podman up front. If a destroy
+// commits before that pass writes its view back, the pass must not resurrect
+// what was just removed -- which is what put a destroyed instance back in the
+// list as "missing" on the TUI's next two-second refresh.
+func TestReconcileDoesNotResurrectAnInstanceRemovedMidPass(t *testing.T) {
+	m, fake := newTestManager(t)
+	mustCreate(t, m, "postgres:16", "ghost")
+
+	// Remove runs after the pass has read the config but before it commits.
+	var once sync.Once
+	fake.OnListManaged = func() {
+		once.Do(func() {
+			if err := m.Remove(context.Background(), "ghost", RemoveOptions{Force: true}); err != nil {
+				t.Errorf("Remove during reconcile: %v", err)
+			}
+		})
+	}
+
+	if _, err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	list, err := m.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("destroyed instance came back: %+v", list)
+	}
+	// The config file must agree; a ghost there outlives the daemon.
+	persisted, err := m.st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 0 {
+		t.Fatalf("destroyed instance still recorded on disk: %+v", persisted)
+	}
+}
+
+// Quitting DBForge stops the databases, but it is not the user deciding that
+// each of them should be stopped: the next launch must put back exactly what
+// was running, whatever each instance's restart policy says.
+func TestSuspendStopsEverythingAndRestoreBringsItBack(t *testing.T) {
+	m, _ := newTestManager(t)
+	always := mustCreate(t, m, "postgres:16", "keeps-running")
+	never, err := m.Create(context.Background(), CreateOptions{
+		Ref: "redis:7", ID: "no-restart", Start: true, Restart: model.RestartNo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One the user stopped on purpose. It must stay stopped.
+	mustCreate(t, m, "mysql:8", "user-stopped")
+	if err := m.Stop(context.Background(), "user-stopped", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := m.Suspend(context.Background())
+	if err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if len(rep.Failed) != 0 {
+		t.Fatalf("suspend failures: %v", rep.Failed)
+	}
+	if got, want := rep.Stopped, []string{always.ID, never.ID}; !slicesEqual(got, want) {
+		t.Fatalf("stopped %v, want %v", got, want)
+	}
+	list, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range list {
+		if i.Status == model.StatusRunning {
+			t.Fatalf("%s still running after suspend", i.ID)
+		}
+		// Desired state is what the user asked for and a shutdown is not a
+		// request to stop, so it must be untouched.
+		if i.ID != "user-stopped" && i.Desired != model.DesiredRunning {
+			t.Fatalf("%s: desired = %q, want running", i.ID, i.Desired)
+		}
+	}
+
+	restored, err := m.Restore(context.Background())
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got, want := restored.Started, []string{always.ID, never.ID}; !slicesEqual(got, want) {
+		t.Fatalf("restored %v, want %v -- restart=no must still come back after a shutdown", got, want)
+	}
+	if _, skipped := restored.Skipped["user-stopped"]; !skipped {
+		t.Fatal("an instance the user stopped was restored by a shutdown resume")
+	}
+
+	// The mark is one-shot: a second restore must not resurrect anything the
+	// user has stopped in the meantime.
+	if err := m.Stop(context.Background(), never.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	again, err := m.Restore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range again.Started {
+		if id == never.ID {
+			t.Fatal("a suspended instance stayed suspended after the user stopped it")
+		}
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// A multi-step mutation holds state in memory between its steps. A reconcile
+// pass that starts and finishes entirely inside one of those gaps sees no
+// change to the generation counter, so the in-flight count is what stops it
+// from writing its stale view back -- which lost the "suspended" mark on
+// whichever databases were stopped before the pass landed.
+func TestReconcileDoesNotClobberAMutationInProgress(t *testing.T) {
+	m, fake := newTestManager(t)
+	mustCreate(t, m, "postgres:16", "a-first")
+	mustCreate(t, m, "redis:7", "b-second")
+
+	// A full reconcile pass runs to completion while the second database is
+	// being stopped -- by which point the first one is already marked in
+	// memory and nothing has been saved yet.
+	var once sync.Once
+	fake.OnStop = func(name string) {
+		if name != "dbforge-b-second" {
+			return
+		}
+		once.Do(func() {
+			if _, err := m.Reconcile(context.Background()); err != nil {
+				t.Errorf("Reconcile during suspend: %v", err)
+			}
+		})
+	}
+
+	if _, err := m.Suspend(context.Background()); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	for _, id := range []string{"a-first", "b-second"} {
+		inst, err := m.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inst.Suspended {
+			t.Errorf("%s lost its suspended mark to a concurrent reconcile", id)
+		}
+	}
+}

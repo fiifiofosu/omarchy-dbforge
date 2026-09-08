@@ -34,6 +34,8 @@ Usage:
   dbctl conn <id>
   dbctl restart-policy <id> <no|on-failure|always>
   dbctl restore
+  dbctl shutdown
+  dbctl update [--check]
   dbctl engines
   dbctl doctor [--json]
 
@@ -75,6 +77,10 @@ func Run(ctx context.Context, args []string) int {
 		err = cmdRestartPolicy(ctx, c, rest)
 	case "restore":
 		err = cmdRestore(ctx, c)
+	case "shutdown", "quit":
+		err = cmdShutdown(ctx, c)
+	case "update", "upgrade":
+		err = cmdUpdate(ctx, rest)
 	case "status":
 		err = cmdStatus(ctx, c, rest)
 	case "tui", "ui":
@@ -255,6 +261,32 @@ func cmdRestore(ctx context.Context, c *Client) error {
 	}
 	if len(rep.Failed) > 0 {
 		return fmt.Errorf("%d instance(s) failed to restore", len(rep.Failed))
+	}
+	return nil
+}
+
+// cmdShutdown stops the databases and the daemon: everything DBForge runs.
+func cmdShutdown(ctx context.Context, c *Client) error {
+	rep, err := c.Shutdown(ctx)
+	if err != nil {
+		// The daemon being unreachable means the job is already done. Saying
+		// "error" for the state the user asked for would be wrong.
+		var down *ErrDaemonUnreachable
+		if errors.As(err, &down) {
+			fmt.Println("DBForge is not running.")
+			return nil
+		}
+		return err
+	}
+	for _, id := range rep.Stopped {
+		fmt.Printf("stopped %s\n", id)
+	}
+	for id, reason := range rep.Failed {
+		fmt.Fprintf(os.Stderr, "failed to stop %s: %s\n", id, reason)
+	}
+	fmt.Println("DBForge stopped. Instances that were running will come back on next launch.")
+	if len(rep.Failed) > 0 {
+		return fmt.Errorf("%d instance(s) failed to stop", len(rep.Failed))
 	}
 	return nil
 }

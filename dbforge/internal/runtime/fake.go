@@ -32,6 +32,14 @@ type Fake struct {
 
 	// Pulled records images PullImage was asked for.
 	Pulled []string
+	// OnStop, if set, is called with the container name at the start of Stop.
+	// It lets a test interleave other work with a multi-step operation that
+	// stops several containers in turn.
+	OnStop func(name string)
+	// OnListManaged, if set, is called at the start of ListManaged. It lets a
+	// test interleave a mutation with a reconcile pass that has already begun,
+	// which is the shape of the race that resurrected destroyed instances.
+	OnListManaged func()
 	// LastCreateSpec is the spec passed to the most recent Create, so tests
 	// can assert on what was actually asked of the runtime.
 	LastCreateSpec CreateSpec
@@ -46,6 +54,9 @@ func NewFake() *Fake {
 func (f *Fake) Ping(context.Context) error { return nil }
 
 func (f *Fake) ListManaged(_ context.Context, labelKey string) ([]Container, error) {
+	if f.OnListManaged != nil {
+		f.OnListManaged()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Container
@@ -137,6 +148,9 @@ func (f *Fake) Start(_ context.Context, name string) error {
 }
 
 func (f *Fake) Stop(_ context.Context, name string, timeout uint) error {
+	if f.OnStop != nil {
+		f.OnStop(name)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastStopTimeout = timeout

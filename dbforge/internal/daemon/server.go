@@ -43,9 +43,17 @@ func SocketPath() string {
 type Server struct {
 	mgr *Manager
 	log *slog.Logger
+	// quit is closed when a client asks the daemon to shut down. Serve stops
+	// on it as it would on a cancelled context, so the process exits cleanly
+	// -- exit 0, which is also what keeps systemd's Restart=on-failure from
+	// bringing back a daemon the user deliberately quit.
+	quit     chan struct{}
+	quitOnce sync.Once
 }
 
-func NewServer(m *Manager, log *slog.Logger) *Server { return &Server{mgr: m, log: log} }
+func NewServer(m *Manager, log *slog.Logger) *Server {
+	return &Server{mgr: m, log: log, quit: make(chan struct{})}
+}
 
 type errorResponse struct {
 	Error string `json:"error"`
@@ -68,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /instances/{id}/connstring", s.handleConnString)
 	mux.HandleFunc("PUT /instances/{id}/restart-policy", s.handleRestartPolicy)
 	mux.HandleFunc("POST /restore", s.handleRestore)
+	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 	return mux
 }
 
@@ -206,7 +215,14 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 		WipeData: r.URL.Query().Get("wipe_data") == "true",
 		Force:    r.URL.Query().Get("force") == "true",
 	}
-	if err := s.mgr.Remove(r.Context(), r.PathValue("id"), opt); err != nil {
+	// Deliberately detached from the request context. A destroy that is half
+	// done -- container removed, entry still recorded -- is the one outcome
+	// worse than either finishing or not starting, and a client that hangs up
+	// mid-request (the TUI quitting, a Ctrl-C) would otherwise cancel it
+	// exactly there. The removal is bounded by its own timeout instead.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+	defer cancel()
+	if err := s.mgr.Remove(ctx, r.PathValue("id"), opt); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -232,12 +248,14 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConnString(w http.ResponseWriter, r *http.Request) {
-	cs, err := s.mgr.ConnString(r.PathValue("id"))
+	cs, pw, err := s.mgr.Credentials(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"conn_string": cs})
+	// The password is already inside the connection string; returning it
+	// separately saves every caller from parsing a URL back apart.
+	writeJSON(w, http.StatusOK, map[string]string{"conn_string": cs, "password": pw})
 }
 
 func (s *Server) handleRestartPolicy(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +330,41 @@ func errKind(err error) string {
 	return ""
 }
 
-// Serve listens on the Unix socket until ctx is cancelled.
+// Quit is closed once a client has asked the daemon to shut down and the
+// instances have been stopped. Serve returns on it; main exits 0.
+func (s *Server) Quit() <-chan struct{} { return s.quit }
+
+// handleShutdown stops every running instance and then the daemon itself.
+//
+// The reply is sent before the process goes away: the client asked what
+// happened, and a connection dropped mid-shutdown cannot say. Exiting is
+// deferred just long enough for the response to be written.
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	// Detached from the request, like a removal: a client that hangs up must
+	// not leave half the databases running.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+	defer cancel()
+
+	rep, err := s.mgr.Suspend(ctx)
+	if err != nil {
+		s.log.Error("shutdown: saving state failed", "error", err)
+	}
+	if rep.Stopped == nil {
+		rep.Stopped = []string{}
+	}
+	writeJSON(w, http.StatusOK, rep)
+
+	// Flush before the listener closes, or the client sees a dropped
+	// connection instead of the report it just asked for.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	s.log.Info("shutting down on request", "stopped", rep.Stopped, "failed", rep.Failed)
+	s.quitOnce.Do(func() { close(s.quit) })
+}
+
+// Serve listens on the Unix socket until ctx is cancelled or a client asks the
+// daemon to shut down.
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		return err
@@ -339,7 +391,10 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 
 	srv := &http.Server{Handler: s.Handler()}
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-s.quit:
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(shutCtx)

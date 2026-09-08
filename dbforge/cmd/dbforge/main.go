@@ -32,6 +32,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// So `dbctl update` can tell this build apart from the newest release.
+	cli.Version = version
+
 	args := os.Args[1:]
 	switch {
 	case len(args) > 0 && (args[0] == "--version" || args[0] == "version"):

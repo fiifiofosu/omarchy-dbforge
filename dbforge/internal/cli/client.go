@@ -214,6 +214,31 @@ func (c *Client) SetRestartPolicy(ctx context.Context, id, policy string) error 
 	return nil
 }
 
+// SuspendReport mirrors daemon.SuspendReport.
+type SuspendReport struct {
+	Stopped []string          `json:"Stopped"`
+	Failed  map[string]string `json:"Failed"`
+}
+
+// Shutdown stops every running instance and then the daemon.
+//
+// The daemon replies before it exits, so a normal response is expected. A
+// connection dropped without one still means the shutdown happened -- the
+// daemon does not get that far and then change its mind -- so callers treat
+// an EOF here as success rather than telling the user it failed.
+func (c *Client) Shutdown(ctx context.Context) (SuspendReport, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/shutdown", nil)
+	if err != nil {
+		return SuspendReport{}, err
+	}
+	defer resp.Body.Close()
+	var out SuspendReport
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return SuspendReport{}, err
+	}
+	return out, nil
+}
+
 // RestoreReport mirrors daemon.RestoreReport.
 type RestoreReport struct {
 	Started []string          `json:"Started"`
@@ -243,14 +268,23 @@ func (c *Client) Logs(ctx context.Context, id string, follow bool, tail int, w i
 }
 
 func (c *Client) ConnString(ctx context.Context, id string) (string, error) {
+	conn, _, err := c.Credentials(ctx, id)
+	return conn, err
+}
+
+// Credentials returns an instance's connection string and password. The
+// password is per-instance on purpose: it is not in the list response, so
+// nothing that dumps every instance dumps every password with it.
+func (c *Client) Credentials(ctx context.Context, id string) (conn, password string, err error) {
 	resp, err := c.do(ctx, http.MethodGet, "/instances/"+url.PathEscape(id)+"/connstring", nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	var out struct {
 		ConnString string `json:"conn_string"`
+		Password   string `json:"password"`
 	}
 	err = json.NewDecoder(resp.Body).Decode(&out)
-	return out.ConnString, err
+	return out.ConnString, out.Password, err
 }

@@ -169,3 +169,67 @@ func TestDestroyViewExplainsBothOutcomes(t *testing.T) {
 		}
 	}
 }
+
+// Reaching a wipe must require the whole deliberate sequence and nothing less.
+//
+// This drives the destroy dialog with every key sequence of up to five
+// keystrokes drawn from the ones that do anything there, and asserts that none
+// of them arrives at a wipe -- the only sequences that may are the ones that
+// spell out the instance name, which are far longer than five keys. It exists
+// because "which keys can delete a database" is not a question to answer by
+// reading the switch statement and hoping.
+func TestNoShortKeySequenceCanReachAWipe(t *testing.T) {
+	alphabet := []string{
+		"enter", "esc", "up", "down", "k", "j", "tab", "y", "n", "q", "d",
+		"backspace", "a", "p",
+	}
+
+	var seq []string
+	var walk func(depth int)
+	walk = func(depth int) {
+		if depth == 0 {
+			return
+		}
+		for _, k := range alphabet {
+			seq = append(seq, k)
+
+			m := New(nil)
+			m.destroy = newDestroyModel(testInstance())
+			m.view = viewConfirmDestroy
+			for _, pressed := range seq {
+				out, _ := m.updateDestroy(key(pressed))
+				m = out.(Model)
+			}
+			// stepWorking is the only state from which a removal is sent, and
+			// choice says whether that removal takes the data with it.
+			if m.destroy.step == stepWorking && m.destroy.choice == destroyWithData {
+				t.Fatalf("key sequence %v reached a data wipe without typing the instance name", seq)
+			}
+
+			walk(depth - 1)
+			seq = seq[:len(seq)-1]
+		}
+	}
+	walk(4)
+}
+
+// The counterpart: the deliberate sequence does reach it, or the test above
+// would pass on a dialog that can never delete anything at all.
+func TestTheDeliberateSequenceDoesReachAWipe(t *testing.T) {
+	m := New(nil)
+	m.destroy = newDestroyModel(testInstance())
+	m.view = viewConfirmDestroy
+
+	for _, k := range []string{"down", "enter"} {
+		out, _ := m.updateDestroy(key(k))
+		m = out.(Model)
+	}
+	m = typeString(m, testInstance().ID)
+	out, _ := m.updateDestroy(key("enter"))
+	m = out.(Model)
+
+	if m.destroy.step != stepWorking || m.destroy.choice != destroyWithData {
+		t.Fatalf("step = %v choice = %v; the deliberate path no longer wipes",
+			m.destroy.step, m.destroy.choice)
+	}
+}
