@@ -11,10 +11,10 @@ OMARCHY_SHELL ?= /usr/share/omarchy/shell
 QMLLINT       ?= /usr/lib/qt6/bin/qmllint
 QML            = Panel.qml Service.qml DbForgeIcon.qml
 
-.PHONY: check test validate lint install uninstall \
+.PHONY: check test validate lint version install uninstall \
         dbforge dbforge-test dbforge-install
 
-check: test validate lint
+check: version test validate lint
 
 # Model.js is plain JavaScript, so the shaping rules are testable without a
 # shell to run them in. Skipped rather than failed without node: node is not
@@ -28,6 +28,18 @@ test:
 
 validate:
 	omarchy plugin validate .
+
+# The widget and the daemon ship together from one repository, so they carry
+# one version number. They are declared in two files that nothing keeps in
+# step, which is exactly the kind of drift a release notices too late.
+version:
+	@manifest=$$(jq -r '.version' manifest.json); \
+	daemon=$$(tr -d '[:space:]' < dbforge/VERSION); \
+	if [ "$$manifest" != "$$daemon" ]; then \
+		echo "version mismatch: manifest.json says $$manifest, dbforge/VERSION says $$daemon" >&2; \
+		exit 1; \
+	fi; \
+	echo "version $$manifest"
 
 # Expect import warnings: qmllint cannot resolve Quickshell's module layout, so
 # every panel produces a cascade of them. Omarchy's own first-party plugins

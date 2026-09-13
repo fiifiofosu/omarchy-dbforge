@@ -41,3 +41,6 @@ jobs:
       # Model.js is plain JavaScript, so the widget's shaping rules -- what
       # counts as a problem, what the bar shows -- are testable without a shell.
       - run: node model_test.mjs
+      # The two halves ship together under one version, declared in two files
+      # that nothing else keeps in step.
+      - run: make version

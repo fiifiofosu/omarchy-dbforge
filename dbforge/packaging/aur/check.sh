@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Builds the AUR package from the local checkout and reports what it installs.
 #
-# The PKGBUILD points at the GitHub remote, which is private and in any case
-# only has what has been pushed. To check the PKGBUILD against the code in
-# front of you, this swaps the source for a file:// clone of this repo. Nothing
-# else about the PKGBUILD is altered, so a failure here is a real failure.
+# The PKGBUILD points at the GitHub remote, which only has what has been
+# pushed. To check the PKGBUILD against the code in front of you, this swaps
+# the source for a file:// clone of this repo. Nothing else about the PKGBUILD
+# is altered, so a failure here is a real failure.
+#
+# Two directories matter and they are not the same one: REPO is the git
+# repository, whose root is the Omarchy bar widget, and that is what gets
+# cloned; PROJ is this Go project, one level down, and that is where the
+# packaging files live. The PKGBUILD does the same walk with $_srcdir.
 #
 # Usage: packaging/aur/check.sh [--install]
 set -euo pipefail
 
 REPO="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+PROJ="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -23,16 +29,16 @@ command -v makepkg >/dev/null || fail "makepkg not found (install pacman's base-
 # clean chroot. Routing every go invocation through make is what keeps the tags
 # in one place, so check that nothing has slipped back to calling go directly.
 say "Checking the PKGBUILD builds through make"
-if grep -nE '^[[:space:]]*go (build|test)' "$REPO/packaging/aur/dbforge-git/PKGBUILD"; then
+if grep -nE '^[[:space:]]*go (build|test)' "$PROJ/packaging/aur/dbforge-git/PKGBUILD"; then
   fail "PKGBUILD calls go directly; use a make target so GOTAGS applies"
 fi
 printf '    ok      no direct go invocations\n'
 
 say "Checking the pacman install hooks"
-"$REPO/packaging/aur/hook-test.sh" | sed 's/^/    /'
+"$PROJ/packaging/aur/hook-test.sh" | sed 's/^/    /'
 
-cp "$REPO/packaging/aur/dbforge-git/PKGBUILD" \
-   "$REPO/packaging/aur/dbforge-git/dbforge.install" "$WORK/"
+cp "$PROJ/packaging/aur/dbforge-git/PKGBUILD" \
+   "$PROJ/packaging/aur/dbforge-git/dbforge.install" "$WORK/"
 
 # file:// rather than the remote, so this checks the working tree's HEAD.
 sed -i "s|git+\$url.git|git+file://$REPO|" "$WORK/PKGBUILD"
@@ -94,8 +100,8 @@ else
   # nothing here has necessarily created it. Errors are not swallowed: CI
   # uploads this file as an artefact, and a silently skipped copy turned into
   # a green build that published nothing.
-  mkdir -p "$REPO/dist"
-  cp "$PKGFILE" "$REPO/dist/"
+  mkdir -p "$PROJ/dist"
+  cp "$PKGFILE" "$PROJ/dist/"
   say "OK. Package left in dist/$(basename "$PKGFILE")"
   say "Re-run with --install to install it."
 fi

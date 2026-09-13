@@ -129,13 +129,23 @@ uninstall:
 	@echo "  data:       ~/.local/share/dbforge"
 	@echo "To remove those too, run 'dbctl rm <id> --wipe-data' BEFORE uninstalling."
 
-# Source tarball for a versioned AUR package. Uses git archive so it contains
-# exactly what is committed -- no dist/, no stray local files.
+# Source tarball for a release. Uses git archive so it contains exactly what is
+# committed -- no dist/, no stray local files.
+#
+# It archives the whole repository, not just this directory: the release is of
+# the repository, and the Omarchy widget at the root is half of what is being
+# released.
+#
+# The -C is what makes that true. `git archive` filters by the directory it
+# runs in, so running it from here would quietly produce a tarball of this
+# subtree alone -- which is what it did until someone looked inside. Running it
+# from the top level means the output path has to be absolute.
 dist-tarball:
 	@mkdir -p dist
-	git archive --format=tar.gz --prefix=dbforge-$(VERSION)/ \
-		-o dist/dbforge-$(VERSION).tar.gz HEAD
-	@echo "dist/dbforge-$(VERSION).tar.gz"
+	git -C "$$(git rev-parse --show-toplevel)" archive \
+		--format=tar.gz --prefix=omarchy-dbforge-$(VERSION)/ \
+		-o "$(CURDIR)/dist/omarchy-dbforge-$(VERSION).tar.gz" HEAD
+	@echo "dist/omarchy-dbforge-$(VERSION).tar.gz"
 
 # .SRCINFO is what the AUR indexes; it must be regenerated whenever the
 # PKGBUILD changes or the upload is rejected.

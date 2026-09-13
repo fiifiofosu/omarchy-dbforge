@@ -5,7 +5,7 @@ pkgver=0.0.0
 pkgrel=1
 pkgdesc="Local database instance manager for Omarchy, backed by rootless Podman"
 arch=('x86_64' 'aarch64')
-url="https://github.com/fiifiofosu/dbforge"
+url="https://github.com/fiifiofosu/omarchy-dbforge"
 license=('MIT')
 # podman is a hard runtime dependency: dbforge has no other backend, and the
 # daemon exits with a clear error rather than half-working without it.
@@ -13,10 +13,14 @@ depends=('podman')
 makedepends=('go' 'git')
 # waybar is optional because the CLI and TUI are complete without a bar, and
 # the widget installer is opt-in either way.
-optdepends=('waybar: status widget and quick start/stop menu')
+optdepends=('waybar: status widget and quick start/stop menu'
+            'omarchy: native bar widget, installed with `omarchy plugin add`')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 install="$_pkgname.install"
+# The repository root is the Omarchy bar widget; this Go project is the
+# dbforge/ subdirectory of it, so every build step below works from there.
+_srcdir="$_pkgname/dbforge"
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
@@ -35,14 +39,14 @@ pkgver() {
 }
 
 prepare() {
-  cd "$srcdir/$_pkgname"
+  cd "$srcdir/$_srcdir"
   # Modules are fetched here so build() can run with networking disabled, which
   # is how a clean chroot build works.
   go mod download
 }
 
 build() {
-  cd "$srcdir/$_pkgname"
+  cd "$srcdir/$_srcdir"
   # Arch's Go packaging flags: PIE, full RELRO, and no VCS stamping (makepkg
   # builds from a detached checkout, which Go would otherwise mark dirty).
   export CGO_CPPFLAGS="${CPPFLAGS}"
@@ -53,7 +57,7 @@ build() {
 }
 
 check() {
-  cd "$srcdir/$_pkgname"
+  cd "$srcdir/$_srcdir"
   # Through make, so the build tags match build() exactly. A bare `go test`
   # here compiled without them and pulled in the btrfs graph driver, which
   # needs C headers a clean build chroot does not have -- invisible on a
@@ -66,6 +70,6 @@ check() {
 }
 
 package() {
-  cd "$srcdir/$_pkgname"
+  cd "$srcdir/$_srcdir"
   make DESTDIR="$pkgdir" PREFIX=/usr VERSION="$pkgver" install
 }
