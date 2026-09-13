@@ -1,0 +1,4 @@
+# Nothing here is built; this catches stray editor and OS droppings only.
+*~
+*.swp
+.DS_Store

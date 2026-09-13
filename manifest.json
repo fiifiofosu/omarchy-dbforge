@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.fiifiofosu.dbforge",
+  "name": "DBForge",
+  "version": "1.0.0",
+  "author": "Ebenezer Nana Ofosu",
+  "license": "MIT",
+  "description": "Local database instances in the Omarchy bar: status at a glance, start/stop, and copy a connection string.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "DBForge",
+    "description": "Start and stop local Postgres/MySQL/Redis instances and copy their connection strings.",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 10,
+      "dbctlPath": "",
+      "tuiPath": ""
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 3600,
+        "step": 1,
+        "defaultValue": 10,
+        "description": "How often to poll dbforged for instance state. The panel also refreshes on open and after every action."
+      },
+      {
+        "key": "dbctlPath",
+        "type": "path",
+        "label": "dbctl binary",
+        "defaultValue": "",
+        "description": "Leave empty to search $DBFORGE_DBCTL, ~/.local/bin, /usr/local/bin, /usr/bin and $PATH."
+      },
+      {
+        "key": "tuiPath",
+        "type": "path",
+        "label": "dbforge-tui binary",
+        "defaultValue": "",
+        "description": "Leave empty to search alongside dbctl. Opened by the panel's terminal action."
+      }
+    ]
+  }
+}
