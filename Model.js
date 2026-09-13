@@ -7,8 +7,8 @@
 .pragma library
 
 // Severity ranks instances so both the bar label and the panel list lead with
-// whatever is wrong. It mirrors internal/cli/status.go:severity so the widget
-// and the waybar module never disagree about what counts as a problem.
+// whatever is wrong. It mirrors the ranking DBForge's own `dbctl status` uses,
+// so this widget and DBForge never disagree about what counts as a problem.
 function severity(instance) {
   if (!instance) return 0
   if (instance.status === "missing") return 3

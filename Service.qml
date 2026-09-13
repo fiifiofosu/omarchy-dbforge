@@ -46,7 +46,7 @@ Item {
   // The shell is started by uwsm/systemd, whose environment has no
   // ~/.local/bin on PATH -- a user manager never sources ~/.bashrc. A bare
   // "dbctl" would resolve to nothing and the widget would render empty, which
-  // is the same trap packaging/waybar/module.jsonc documents. So look in the
+  // is the same trap DBForge's own waybar module documents. So look in the
   // places the installer actually puts the binary before falling back to PATH.
   function resolveBinaries() {
     if (resolveProcess.running) return

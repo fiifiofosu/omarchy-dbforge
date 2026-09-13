@@ -3,13 +3,19 @@
 Local database instances in the Omarchy bar. See what is running, start and
 stop it, and copy a connection string, without leaving the bar.
 
-This is the Omarchy 4.0 shell plugin for [DBForge](https://github.com/fiifiofosu/dbforge), which manages local
-Postgres/MySQL/Redis instances as rootless Podman containers. The widget needs
-DBForge installed; it does not bundle it.
+This is a front end, not a database manager. It drives **DBForge**, a daemon
+that runs local Postgres, MySQL and Redis instances as rootless Podman
+containers, each with its own port and data directory. DBForge does the work;
+this widget puts it on the bar.
 
-If you are still on a waybar setup, DBForge ships a waybar module
-([`packaging/waybar`](https://github.com/fiifiofosu/dbforge/tree/main/packaging/waybar)) instead. The two are
-alternatives, not companions.
+> **You need DBForge installed first.** The widget talks to it through its
+> `dbctl` CLI and bundles none of it. DBForge is not publicly released yet, so
+> unless you already have `dbctl` on your machine, this widget will tell you it
+> cannot find it and there is nothing further it can do. Watch this repository
+> for a link once DBForge ships.
+
+If you run waybar rather than the Omarchy 4.0 shell, DBForge ships a waybar
+module of its own — use that instead. The two are alternatives, not companions.
 
 ## Requirements
 
@@ -142,8 +148,8 @@ omarchy plugin remove io.github.fiifiofosu.dbforge
 ```
 
 Either way it removes the widget only. DBForge, its daemon and your database
-instances are untouched — see the [DBForge README](https://github.com/fiifiofosu/dbforge#upgrading-and-uninstalling)
-for uninstalling those.
+instances are untouched; removing those is DBForge's own business and its
+documentation covers it.
 
 ## License
 
@@ -186,6 +192,24 @@ produce the same warnings in the same categories. What matters is that no new
 | `DbForgeIcon.qml` | The drawn database mark |
 | `install.sh` / `uninstall.sh` | Clone-install helpers; `omarchy plugin add` does not use them |
 
-Design notes for the widget — why it polls instead of using signals, why the
-panel has no create/destroy, and the `qmllint` trap on Arch — are in DBForge's
-[phase 4b notes](https://github.com/fiifiofosu/dbforge/blob/main/docs/phase-4b-notes.md).
+### Three decisions worth knowing
+
+**It polls; it does not listen.** DBForge signals its waybar module with
+`SIGRTMIN+8`, and there is no equivalent here — a plugin shares the long-lived
+shell process, and installing a signal handler in the bar would be a hazard for
+every other widget. So it runs one short-lived `dbctl` per interval, and
+refreshes on panel open and after every action. The alternative is a socket
+client inside the shell process, which is a lot of surface area for a value
+that changes a few times a day.
+
+**It resolves `dbctl` itself.** The shell is started by the systemd user
+manager, whose `PATH` has no `~/.local/bin`, because user services never source
+`~/.bashrc`. A `Process` running a bare `dbctl` finds nothing and the widget
+renders empty with no error anywhere. So it searches on startup and says so
+when it comes up empty.
+
+**The lifecycle methods are inherited, not written.** `qs.Ui`'s `Panel`
+supplies `open`/`close`/`toggle`/`closeForPopoutSwitch` and the
+`opened`/`popoutSwitchClosing` properties, wired to the bar's popout
+coordinator. Reimplementing them by hand works until the bar tries to switch
+popouts.

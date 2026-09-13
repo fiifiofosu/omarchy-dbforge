@@ -55,8 +55,8 @@ eq(Model.summarize(parsed.instances), { running: 1, stopped: 1, problems: 2, tot
    "every instance is counted exactly once")
 
 // "the daemon is down" and "you have no instances" are both an absence and
-// must never render the same way -- the same distinction the waybar module
-// makes in internal/cli/status.go.
+// must never render the same way -- the same distinction DBForge's own status
+// output makes.
 eq(Model.summaryText(Model.summarize(parsed.instances), false),
    "1 running · 1 stopped · 2 need attention", "summary names all three states")
 eq(Model.summaryText(Model.summarize(parsed.instances), true), "Daemon not running",
