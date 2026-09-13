@@ -1,0 +1,30 @@
+/* DBForge waybar module.
+ *
+ * Append to ~/.config/waybar/style.css. Colours come from the bar's own
+ * palette where possible so the widget matches whatever theme is active.
+ */
+
+#custom-dbforge {
+  padding: 0 8px;
+}
+
+/* Nothing to say: present but recessive, so a quiet bar stays quiet. */
+#custom-dbforge.empty,
+#custom-dbforge.stopped {
+  opacity: 0.5;
+}
+
+#custom-dbforge.running {
+  opacity: 1;
+}
+
+/* Something needs attention: an instance is missing or exited uncleanly. */
+#custom-dbforge.problem {
+  color: #f7768e;
+}
+
+/* The daemon is not running. Deliberately styled differently from "no
+ * instances": they are different problems with different fixes. */
+#custom-dbforge.offline {
+  color: #e0af68;
+}

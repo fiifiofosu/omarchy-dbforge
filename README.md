@@ -1,26 +1,38 @@
-# DBForge — Omarchy bar widget
+# DBForge
 
-Local database instances in the Omarchy bar. See what is running, start and
-stop it, and copy a connection string, without leaving the bar.
+Local database instances on Omarchy — any engine, any version, side by side —
+and a bar widget to drive them. See what is running, start and stop it, and
+copy a connection string, without leaving the bar.
 
-This is a front end, not a database manager. It drives **DBForge**, a daemon
-that runs local Postgres, MySQL and Redis instances as rootless Podman
-containers, each with its own port and data directory. DBForge does the work;
-this widget puts it on the bar.
+The widget is a front end. The thing it drives is **DBForge**, a daemon that
+runs local Postgres, MySQL and Redis instances as rootless Podman containers,
+each with its own port and its own data directory — so Postgres 16 next to
+Postgres 15 next to Redis 7 is three commands and no conflicts.
 
-> **You need DBForge installed first.** The widget talks to it through its
-> `dbctl` CLI and bundles none of it. DBForge is not publicly released yet, so
-> unless you already have `dbctl` on your machine, this widget will tell you it
-> cannot find it and there is nothing further it can do. Watch this repository
-> for a link once DBForge ships.
+**Both are in this repository.** The widget is the QML at the root; DBForge is
+the Go under [`dbforge/`](dbforge). Installing the widget does not install
+DBForge — see [Install](#install) — but you never have to go anywhere else to
+get it.
 
 If you run waybar rather than the Omarchy 4.0 shell, DBForge ships a waybar
-module of its own — use that instead. The two are alternatives, not companions.
+module of its own ([`dbforge/packaging/waybar`](dbforge/packaging/waybar)) —
+use that instead. The two are alternatives, not companions.
+
+## Layout
+
+```
+manifest.json  Panel.qml  Service.qml  Model.js  DbForgeIcon.qml
+                    the Omarchy bar widget — must be at the repository root,
+                    because Omarchy reads a plugin's manifest from the root of
+                    the repo it clones
+dbforge/            the daemon, CLI and TUI the widget drives (Go)
+```
 
 ## Requirements
 
 - Omarchy 4.0 or newer (`omarchy plugin` and the Quickshell-based bar)
-- DBForge installed, with `dbctl` and `dbforge-tui` on disk
+- DBForge built and installed from [`dbforge/`](dbforge) — Go 1.26+ and
+  rootless Podman
 - `wl-copy` (`wl-clipboard`), for copying connection strings
 
 ### External commands
@@ -44,13 +56,29 @@ when you ask for them, and are never written to a file or logged.
 
 ## Install
 
+Two halves, installed separately. DBForge first, or the widget will have
+nothing to talk to:
+
+```bash
+git clone https://github.com/fiifiofosu/omarchy-dbforge
+cd omarchy-dbforge/dbforge
+make install && ./packaging/install.sh
+```
+
+That builds `dbforge`, `dbctl` and `dbforge-tui` into `~/.local/bin`, installs
+the systemd user unit, and enables the daemon. It needs Go 1.26+ and rootless
+Podman; `dbforge/README.md` covers the requirements and `dbctl doctor` checks
+them.
+
+Then the widget:
+
 ```bash
 omarchy plugin add https://github.com/fiifiofosu/omarchy-dbforge --enable
 ```
 
-This is the path to prefer. Omarchy clones the repo, validates the manifest,
-asks before enabling, and lets you pick a bar section. Later versions arrive
-with:
+This is the path to prefer for the widget. Omarchy clones the repo, validates
+the manifest, asks before enabling, and lets you pick a bar section. Later
+versions arrive with:
 
 ```bash
 omarchy plugin update io.github.fiifiofosu.dbforge
@@ -62,12 +90,12 @@ Move it along the bar with:
 omarchy bar move io.github.fiifiofosu.dbforge
 ```
 
-### From a clone
+### Installing the widget from your clone
 
-If you would rather read the code first, or are working on it:
+If you already cloned to build DBForge, you can install the widget from there
+too rather than letting Omarchy clone it a second time:
 
 ```bash
-git clone https://github.com/fiifiofosu/omarchy-dbforge
 cd omarchy-dbforge
 ./install.sh
 ```
@@ -148,16 +176,18 @@ omarchy plugin remove io.github.fiifiofosu.dbforge
 ```
 
 Either way it removes the widget only. DBForge, its daemon and your database
-instances are untouched; removing those is DBForge's own business and its
-documentation covers it.
+instances are untouched — [`dbforge/README.md`](dbforge/README.md#upgrading-and-uninstalling)
+covers removing those, and is careful to leave your data alone unless you ask.
 
 ## License
 
-MIT, the same as DBForge itself. See [LICENSE](LICENSE).
+MIT, both halves. See [LICENSE](LICENSE).
 
-The plugin bundles no third-party code: the QML uses only Omarchy's own
+The widget bundles no third-party code: the QML uses only Omarchy's own
 `qs.Ui` / `qs.Commons` components and Qt, and `Model.js` is plain JavaScript
-with no dependencies.
+with no dependencies. DBForge's Go dependencies are declared in
+[`dbforge/go.mod`](dbforge/go.mod) — chiefly Podman's client bindings and
+Bubble Tea for the TUI.
 
 ## Development
 
@@ -191,6 +221,7 @@ produce the same warnings in the same categories. What matters is that no new
 | `model_test.mjs` | Checks for `Model.js` — the states that are awkward to reach live |
 | `DbForgeIcon.qml` | The drawn database mark |
 | `install.sh` / `uninstall.sh` | Clone-install helpers; `omarchy plugin add` does not use them |
+| `dbforge/` | The daemon, CLI and TUI — its own `make test`, and CI covers both halves |
 
 ### Three decisions worth knowing
 

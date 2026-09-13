@@ -11,7 +11,8 @@ OMARCHY_SHELL ?= /usr/share/omarchy/shell
 QMLLINT       ?= /usr/lib/qt6/bin/qmllint
 QML            = Panel.qml Service.qml DbForgeIcon.qml
 
-.PHONY: check test validate lint install uninstall
+.PHONY: check test validate lint install uninstall \
+        dbforge dbforge-test dbforge-install
 
 check: test validate lint
 
@@ -40,3 +41,15 @@ install:
 
 uninstall:
 	./uninstall.sh
+
+# The daemon has its own Makefile and its own dependencies (Go, Podman); these
+# are passthroughs so you do not have to remember which half you are in. Run
+# `make -C dbforge help`-style targets there directly for anything else.
+dbforge:
+	$(MAKE) -C dbforge build
+
+dbforge-test:
+	$(MAKE) -C dbforge test
+
+dbforge-install:
+	$(MAKE) -C dbforge install

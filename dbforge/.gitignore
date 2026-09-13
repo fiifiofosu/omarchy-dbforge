@@ -1,0 +1,7 @@
+/dist/
+/dbforge
+/dbforged
+/dbctl
+*.test
+/packaging/aur/dbforge-git/.SRCINFO
+/stage/

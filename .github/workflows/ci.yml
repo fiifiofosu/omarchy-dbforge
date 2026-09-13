@@ -1,0 +1,43 @@
+name: CI
+
+# This repository ships two things that fail in different ways: a QML plugin,
+# and the Go daemon under dbforge/ that the plugin drives. Only the Go half is
+# checkable here -- `omarchy plugin validate` and the shell's QML modules come
+# with Omarchy, which a runner does not have -- so the plugin is checked
+# locally with `make check` and the daemon is checked here.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  dbforge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dbforge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: dbforge/go.sum
+      # Through the Makefile rather than calling `go` directly: the build needs
+      # specific tags to stay free of cgo (see GOTAGS there), and a workflow
+      # that spelled out its own commands would drift from them.
+      - run: make vet
+      - run: make test
+      - run: make build
+
+  widget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Model.js is plain JavaScript, so the widget's shaping rules -- what
+      # counts as a problem, what the bar shows -- are testable without a shell.
+      - run: node model_test.mjs

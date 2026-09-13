@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Launches the DBForge TUI in a terminal window.
+#
+# This exists because a .desktop entry with Terminal=true is honoured
+# inconsistently by Wayland launchers, and a TUI started without a terminal
+# exits immediately -- indistinguishable, to the person who clicked it, from
+# the application being broken. Choosing the terminal here makes the failure
+# case ("no terminal emulator found") something we can actually say.
+set -euo pipefail
+
+tui=dbforge-tui
+if ! command -v "$tui" >/dev/null 2>&1; then
+  # Prefer the copy next to this script: it belongs to the same installation.
+  here=$(dirname "$(readlink -f "$0")")
+  if [ -x "$here/$tui" ]; then
+    tui="$here/$tui"
+  else
+    echo "dbforge-tui is not installed or not on PATH" >&2
+    exit 1
+  fi
+fi
+
+# $TERMINAL first: the user has already said which one they want. Then
+# xdg-terminal-exec, the freedesktop way to ask. Then the usual suspects.
+candidates=()
+[ -n "${TERMINAL:-}" ] && candidates+=("$TERMINAL")
+candidates+=(xdg-terminal-exec ghostty alacritty kitty foot wezterm
+             gnome-terminal konsole xfce4-terminal xterm)
+
+for term in "${candidates[@]}"; do
+  command -v "$term" >/dev/null 2>&1 || continue
+  case "$(basename "$term")" in
+    xdg-terminal-exec) exec "$term" "$tui" ;;
+    # These take the command after -e; gnome-terminal insists on --.
+    gnome-terminal) exec "$term" -- "$tui" ;;
+    ghostty) exec "$term" -e "$tui" ;;
+    *) exec "$term" -e "$tui" ;;
+  esac
+done
+
+echo "no terminal emulator found; set \$TERMINAL or run '$tui' yourself" >&2
+exit 1
