@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.fiifiofosu.dbforge",
   "name": "DBForge",
-  "version": "1.0.0",
+  "version": "0.9.1",
   "author": "Ebenezer Nana Ofosu",
   "license": "MIT",
   "description": "Local database instances in the Omarchy bar: status at a glance, start/stop, and copy a connection string.",

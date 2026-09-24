@@ -5,8 +5,10 @@ name: Release
 # shipped files releases the next version, worked out from the latest v* tag:
 #
 #   patch  by default
-#   minor  if a commit since the last tag says [minor]
-#   major  if one says [major] or carries a BREAKING CHANGE footer
+#   minor  if a commit since the last tag has a "Bump: minor" trailer line
+#   major  if one has "Bump: major" or a "BREAKING CHANGE:" trailer line
+#
+# Trailers must start their own line; a mention inside a sentence is ignored.
 #
 # Pushes that touch only documentation (*.md, docs/, .github/) release nothing.
 # Setting dbforge/VERSION by hand to an unreleased version still wins, as does
@@ -90,9 +92,12 @@ jobs:
                 else
                   log=$(git log --format=%B "${last}..HEAD")
                   IFS=. read -r major minor patch <<<"${current}"
-                  if grep -qE '\[major\]|^BREAKING[ -]CHANGE:' <<<"$log"; then
+                  # Whole-line trailers only. A marker matched anywhere in the
+                  # text fires on a commit that merely describes these rules,
+                  # which is how v1.0.0 was once released by accident.
+                  if grep -qE '^(Bump: major|BREAKING[ -]CHANGE:)' <<<"$log"; then
                     version="$((major + 1)).0.0"
-                  elif grep -qF '[minor]' <<<"$log"; then
+                  elif grep -qE '^Bump: minor[[:space:]]*$' <<<"$log"; then
                     version="${major}.$((minor + 1)).0"
                   else
                     version="${major}.${minor}.$((patch + 1))"
