@@ -30,6 +30,7 @@ Postgres 15 alongside a Redis 7 is three commands and no conflicts.
 - [Design decisions](#design-decisions)
 - [Safety model](#safety-model)
 - [Supported engines](#supported-engines)
+- [Versions are pinned to digests](#versions-are-pinned-to-digests)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap](#roadmap)
@@ -171,12 +172,19 @@ path for the same reason.
 From inside the app: press `u` in the TUI, or run
 
 ```bash
-dbctl update          # --check reports without installing
+dbctl update
 ```
 
-That downloads the newest release's binaries, verifies them against the
-release's own `SHA256SUMS` before replacing anything, and restarts the daemon.
-It refuses to touch a packaged install and prints the pacman command instead.
+That reports whether a newer release exists and prints the command to install
+it. **It does not install one.** DBForge used to replace its own binaries from
+the newest GitHub release, checking them against that release's `SHA256SUMS`
+first. The checksum was real, but the binary and the hashes it was checked
+against were chosen the same way -- whatever `releases/latest` pointed at that
+minute -- so the check could only prove the two halves agreed with each other,
+never that either was the artifact anyone had reviewed. A program that replaces
+its own executable on the strength of that is a supply-chain hole, so the
+downloader is gone. Installing is the package manager's job; it verifies
+packages against keys you have decided to trust.
 
 By hand, an upgrade replaces the binaries; picking them up means restarting the
 daemon:
@@ -282,13 +290,11 @@ nothing of DBForge is running. Instances that were running are marked as
 suspended rather than stopped, so the next launch brings back exactly what was
 up -- whatever each one's restart policy says. This is what the TUI's `q` does.
 
-**`update`** installs the newest published release over this installation: it
-compares the running version against the newest GitHub release, downloads the
-binaries and the release's `SHA256SUMS`, verifies every file before replacing
-anything, and restarts the daemon. `--check` reports without installing. A
-packaged install (anything under `/usr`) is refused with the pacman command
-that would do it properly, because replacing a package manager's files leaves
-its database lying about what is on disk.
+**`update`** compares the running version against the newest published release
+and, if there is a newer one, prints its version, its release page and the
+command to install it. It downloads nothing and installs nothing -- see
+[Upgrading](#upgrading) for why. `--check` is accepted and ignored, since
+checking is all this command does.
 
 **`list --json`** is the scripting surface, and what the Phase 4 waybar module
 will consume. It always emits a JSON array, never `null`, so consumers can tell
@@ -315,14 +321,14 @@ can take minutes. Both the CLI and the TUI report each phase as the daemon
 reaches it, rather than sitting silent:
 
 ```
-$ dbctl create redis:7.4 --name cache
-  pulling docker.io/library/redis:7.4
+$ dbctl create redis:6.2 --name cache
+  pulling redis:6.2 (pinned to sha256:143f7bfc2358)
   contacting registry
   checking signatures
   downloading layers (layer 1)
   ...
   writing image (layer 7)
-Created cache (redis:7.4) on port 15382
+Created cache (redis:6.2) on port 15382
 ```
 
 Progress goes to stderr, so `dbctl create ... > file` still captures only the
@@ -520,7 +526,7 @@ MySQL and MariaDB have none until a client creates one, which shows as `-`.
 | `c` | Show the connection string |
 | `n` | Create a new instance (guided) |
 | `d` | Destroy it |
-| `u` | Check for and install an update |
+| `u` | Check whether a newer release exists |
 | `r` | Refresh now |
 | `q` | Quit DBForge (stops the databases and the daemon) |
 
@@ -531,9 +537,12 @@ everything running, which is what closing a window usually means. Starting
 DBForge again brings back exactly the databases that were running.
 
 **Creating** walks engine → version → name → port → restart policy. The version
-list comes from Docker Hub, filtered to plain version tags and sorted newest
-first. Offline it falls back to a cache and then to a builtin list, and says
-which it is showing rather than pretending the list is current.
+list is the set of images pinned to a reviewed digest, sorted newest first --
+see [Versions are pinned to digests](#versions-are-pinned-to-digests). It is
+compiled in, so it needs no network, is the same on every machine, and is
+exactly the set `create` will accept. It used to be fetched from Docker Hub and
+cached, with a warning when the list might be stale; there is nothing left to
+be stale about.
 
 **Destroying** asks what should happen to the data. Removing the container and
 keeping the data is preselected, so a reflexive enter never deletes a database.
@@ -739,12 +748,55 @@ wrong, so the destructive path is deliberately awkward:
 | `mariadb` | `docker.io/library/mariadb` | 3317 | `/var/lib/mysql` |
 | `redis` | `docker.io/library/redis` | 6380 | `/data` |
 
+### Versions are pinned to digests
+
+DBForge runs only images that are pinned in
+[`internal/engines/pins.go`](internal/engines/pins.go), each named by the
+digest of its manifest rather than by a tag:
+
+```
+$ dbctl engines
+mariadb   11 10.11 10.6
+mysql     9 8.4 8.0
+postgres  18 17 16 15 14 13
+redis     8 7 6.2
+```
+
+Anything else is refused before a container, a data directory or a port is
+created:
+
+```
+$ dbctl create postgres:16.3
+error: postgres:16.3 is not an approved image (approved: 18, 17, 16, 15, 14, 13)
+```
+
+**Why.** A registry tag is a mutable pointer. `postgres:16` names whatever the
+library maintainers last pushed under that name, so an instance created today
+and an instance created in six months can be running different code, and
+neither need be the code anyone reviewed. Pulling a tag means executing
+whatever the registry decides to serve at pull time. A digest is a content
+address: it names exactly one artifact, Podman verifies what it receives
+against it, and it cannot be repointed.
+
+So `postgres:16` is what you type and what the data layout is chosen from, and
+`docker.io/library/postgres@sha256:f1c3376c…` is what is pulled, run and
+recorded against the instance. `dbctl list --json` shows the digest each
+instance is actually running.
+
+The cost is that a new upstream version is not available the day it ships.
+Approving one is deliberate and reviewable: add it to `APPROVED` in
+[`scripts/update-pins.sh`](scripts/update-pins.sh), run `make pins`, and the
+resulting change to `pins.go` goes through review like any other code. The
+TUI's version list is this same set, which is why it needs no network and is
+correct offline.
+
 Engines that initialise on first boot (Postgres's `initdb`, MySQL's setup) get
 their initialisation environment only when the data directory is new. Passing
 it again against a populated directory is at best ignored and at worst an
 error, so first-boot versus subsequent-boot is modelled explicitly.
 
-Adding an engine means one entry in `internal/engines/engines.go`.
+Adding an engine means one entry in `internal/engines/engines.go` and its
+versions in `scripts/update-pins.sh`, followed by `make pins`.
 
 ---
 
@@ -756,7 +808,14 @@ make vet               # both build tags
 make build             # -> dist/dbforge, dist/dbforge-tui
 make test-integration  # needs a live rootless Podman; pulls real images
 make pkgbuild-check    # builds the AUR package and checks what it installs
+make pins              # re-resolve the approved images to digests (network)
+make security-baseline # re-establish the supply-chain properties (network)
 ```
+
+`make pins` and `make security-baseline` are the supply-chain pair: the first
+is how the set of runnable images changes, the second proves that nothing has
+crept back in. See [Versions are pinned to
+digests](#versions-are-pinned-to-digests).
 
 ### Layout
 
@@ -764,15 +823,15 @@ make pkgbuild-check    # builds the AUR package and checks what it installs
 cmd/dbforge/        entry point; dispatches daemon vs CLI on argv[0]
 cmd/dbforge-tui/    the TUI, kept out of the CLI binary on purpose
 internal/model/     shared types; also the on-disk schema
-internal/engines/   the engine catalogue
+internal/engines/   the engine catalogue, and pins.go: the approved images
 internal/ports/     port allocation, with real bind probing
 internal/store/     instances.toml: atomic writes, external-edit detection
 internal/runtime/   container engine interface + Podman impl + in-memory fake
 internal/daemon/    Manager (all state) and the HTTP server
 internal/cli/       dbctl
-internal/registry/  engine version lists, cached for offline use
 internal/tui/       the Bubble Tea interface
 internal/notify/    signals the status bar when state changes
+scripts/            pin regeneration and the security baseline
 packaging/waybar/   module definition, styling, menu script, installer
 
 This directory is `dbforge/` within the repository; the Omarchy widget's QML

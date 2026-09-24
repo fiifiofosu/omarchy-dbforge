@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
 	"github.com/fiifiofosu/dbforge/internal/ports"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
@@ -30,6 +31,22 @@ func newTestManager(t *testing.T) (*Manager, *runtime.Fake) {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
 	return m, fake
+}
+
+// pinnedRef is the image reference an engine:version actually resolves to --
+// image@sha256:..., never the tag. Tests that pre-seed the fake's image cache
+// have to use it, because the tag is not what the manager asks for.
+func pinnedRef(t *testing.T, ref string) string {
+	t.Helper()
+	eng, version, err := engines.ParseRef(ref)
+	if err != nil {
+		t.Fatalf("ParseRef(%s): %v", ref, err)
+	}
+	image, err := eng.PinnedRef(version)
+	if err != nil {
+		t.Fatalf("PinnedRef(%s): %v", ref, err)
+	}
+	return image
 }
 
 func mustCreate(t *testing.T, m *Manager, ref, id string) model.Instance {
@@ -105,7 +122,7 @@ func TestCreateRollsBackWhenContainerCreationFails(t *testing.T) {
 	// Simulates disk-full or subuid exhaustion at container-create time. The
 	// instance must not survive as a phantom marked running.
 	m, fake := newTestManager(t)
-	fake.Images["docker.io/library/postgres:16"] = true
+	fake.Images[pinnedRef(t, "postgres:16")] = true
 	fake.CreateErr = errors.New("no space left on device")
 
 	_, err := m.Create(context.Background(), CreateOptions{Ref: "postgres:16", ID: "doomed"})
@@ -130,7 +147,7 @@ func TestCreateRollsBackWhenContainerCreationFails(t *testing.T) {
 
 func TestCreateDoesNotMarkRunningWhenStartFails(t *testing.T) {
 	m, fake := newTestManager(t)
-	fake.Images["docker.io/library/redis:7"] = true
+	fake.Images[pinnedRef(t, "redis:7")] = true
 	inst, err := m.Create(context.Background(), CreateOptions{Ref: "redis:7", ID: "r", Start: false})
 	if err != nil {
 		t.Fatal(err)
@@ -469,7 +486,7 @@ func TestSuspendStopsEverythingAndRestoreBringsItBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	// One the user stopped on purpose. It must stay stopped.
-	mustCreate(t, m, "mysql:8", "user-stopped")
+	mustCreate(t, m, "mysql:8.4", "user-stopped")
 	if err := m.Stop(context.Background(), "user-stopped", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -575,5 +592,73 @@ func TestReconcileDoesNotClobberAMutationInProgress(t *testing.T) {
 		if !inst.Suspended {
 			t.Errorf("%s lost its suspended mark to a concurrent reconcile", id)
 		}
+	}
+}
+
+// The whole point of the pinning work: what gets pulled and run is named by
+// digest, not by a tag. A tag is a mutable pointer, so an instance created
+// after the registry repoints postgres:16 would run code nobody reviewed.
+func TestCreatePullsAndRunsByDigestNotByTag(t *testing.T) {
+	m, fake := newTestManager(t)
+	inst := mustCreate(t, m, "postgres:16", "pinned")
+
+	want := pinnedRef(t, "postgres:16")
+	if !strings.Contains(want, "@sha256:") {
+		t.Fatalf("the pin for postgres:16 is not a digest: %q", want)
+	}
+
+	// Pulled by digest.
+	if len(fake.Pulled) != 1 || fake.Pulled[0] != want {
+		t.Errorf("pulled %v, want exactly [%s]", fake.Pulled, want)
+	}
+	// Run by digest: this is the reference podman resolves to an image.
+	if got := fake.LastCreateSpec.Image; got != want {
+		t.Errorf("container image = %q, want %q", got, want)
+	}
+	// Persisted by digest, so the record says which artifact this instance
+	// actually is rather than which name it was created under.
+	if inst.Image != want {
+		t.Errorf("instance image = %q, want %q", inst.Image, want)
+	}
+	// The tag survives only as the version, which is what the user typed and
+	// what the catalogue reasons about.
+	if inst.Version != "16" {
+		t.Errorf("version = %q, want 16", inst.Version)
+	}
+	for _, ref := range append(fake.Pulled, fake.LastCreateSpec.Image) {
+		if strings.HasSuffix(ref, ":16") {
+			t.Errorf("a mutable tag reached the runtime: %q", ref)
+		}
+	}
+}
+
+// An unapproved version has to fail before anything exists, not after. A
+// rejection that costs the user a container, a data directory and a port is a
+// rejection they will work around.
+func TestCreateRejectsAnUnpinnedVersionBeforeTouchingAnything(t *testing.T) {
+	m, fake := newTestManager(t)
+
+	_, err := m.Create(context.Background(), CreateOptions{Ref: "postgres:16.3", ID: "unapproved"})
+	if err == nil {
+		t.Fatal("an unpinned version was accepted")
+	}
+	var unapproved *engines.UnapprovedVersionError
+	if !errors.As(err, &unapproved) {
+		t.Fatalf("got %v, want an UnapprovedVersionError", err)
+	}
+	// The message has to name what the user may have instead, or the only way
+	// forward is guessing.
+	if !strings.Contains(err.Error(), "16") {
+		t.Errorf("the error does not list the approved versions: %v", err)
+	}
+
+	if len(fake.Pulled) != 0 {
+		t.Errorf("an unapproved version still pulled %v", fake.Pulled)
+	}
+	if len(fake.Containers) != 0 {
+		t.Errorf("an unapproved version still created a container")
+	}
+	if _, err := m.Get("unapproved"); !errors.Is(err, ErrInstanceNotFound) {
+		t.Error("an unapproved version left an instance entry behind")
 	}
 }

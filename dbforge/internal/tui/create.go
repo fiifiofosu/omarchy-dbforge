@@ -10,8 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fiifiofosu/dbforge/internal/daemon"
+	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
-	"github.com/fiifiofosu/dbforge/internal/registry"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
 )
 
@@ -36,9 +36,6 @@ type createModel struct {
 
 	versions     []string
 	versionIndex int
-	versionSrc   registry.Source
-	versionFetch time.Time
-	versionErr   error
 	versionsFor  string // which engine the list belongs to
 
 	name string
@@ -80,16 +77,19 @@ func (c createModel) version() string {
 	return c.versions[c.versionIndex]
 }
 
-// applyVersions installs a version list, ignoring one that arrives for an
-// engine the user has since moved away from.
-func (c *createModel) applyVersions(engine string, r registry.Result) {
+// loadVersions installs the version list for an engine.
+//
+// The list is the set of images pinned to a reviewed digest, so it is compiled
+// in: identical on every machine, correct offline, and available without a
+// round trip. It used to be fetched from Docker Hub and cached, which is why
+// the form had "showing a cached list" and "this may be out of date" states --
+// none of which can arise now, because the list no longer comes from anywhere
+// that could disagree with what DBForge is actually able to run.
+func (c *createModel) loadVersions(engine string) {
 	if engine != c.engine() {
 		return
 	}
-	c.versions = r.Versions
-	c.versionSrc = r.Source
-	c.versionFetch = r.FetchedAt
-	c.versionErr = r.Err
+	c.versions = engines.ApprovedVersions(engine)
 	c.versionsFor = engine
 	if c.versionIndex >= len(c.versions) {
 		c.versionIndex = 0
@@ -179,7 +179,7 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case stepEngine:
 			if c.engineIndex < len(c.engines)-1 {
 				c.engineIndex++
-				return m, m.loadVersionsFor(c.engine())
+				c.loadVersions(c.engine())
 			}
 		case stepVersion:
 			if c.versionIndex < len(c.versions)-1 {
@@ -197,7 +197,7 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case stepEngine:
 			if c.engineIndex > 0 {
 				c.engineIndex--
-				return m, m.loadVersionsFor(c.engine())
+				c.loadVersions(c.engine())
 			}
 		case stepVersion:
 			if c.versionIndex > 0 {
@@ -243,18 +243,13 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) loadVersionsFor(engine string) tea.Cmd {
-	// Show the cache instantly so the list is never empty while we wait.
-	m.create.applyVersions(engine, m.registry.CachedOnly(engine))
-	return m.fetchVersions(engine)
-}
-
 func (m Model) advanceCreate() (tea.Model, tea.Cmd) {
 	c := &m.create
 	switch c.step {
 	case stepEngine:
 		c.step = stepVersion
-		return m, m.loadVersionsFor(c.engine())
+		c.loadVersions(c.engine())
+		return m, nil
 
 	case stepVersion:
 		if c.version() == "" {
@@ -340,7 +335,6 @@ func (m Model) viewCreate() string {
 		b.WriteString(chooser(c.engines, c.engineIndex))
 	case stepVersion:
 		b.WriteString(chooser(c.versions, c.versionIndex))
-		b.WriteString(versionSourceNote(c))
 	case stepRestart:
 		opts := make([]string, len(c.restarts))
 		for i, r := range c.restarts {
@@ -368,31 +362,6 @@ func (m Model) viewCreate() string {
 		b.WriteString(styleHelp.Render("up/down choose   enter next   esc cancel"))
 	}
 	return b.String()
-}
-
-// versionSourceNote tells the user when the list is not live, which matters
-// when creating an instance offline (spec 7, phase 3).
-func versionSourceNote(c createModel) string {
-	switch c.versionSrc {
-	case registry.SourceCache:
-		when := "unknown time"
-		if !c.versionFetch.IsZero() {
-			when = humanAge(c.versionFetch) + " ago"
-		}
-		msg := fmt.Sprintf("\noffline: showing a cached list from %s", when)
-		if c.versionErr != nil {
-			msg += "\nreason: " + c.versionErr.Error()
-		}
-		return styleWarn.Render(msg) + "\n"
-	case registry.SourceBuiltin:
-		msg := "\noffline: showing DBForge's builtin list, which may be out of date"
-		if c.versionErr != nil {
-			msg += "\nreason: " + c.versionErr.Error()
-		}
-		return styleWarn.Render(msg) + "\n"
-	default:
-		return ""
-	}
 }
 
 func restartHelp(p model.RestartPolicy) string {
@@ -436,18 +405,6 @@ func chooser(options []string, index int) string {
 		b.WriteString(styleDim.Render(fmt.Sprintf("    ... %d more\n", len(options)-end)))
 	}
 	return b.String()
-}
-
-func humanAge(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
 }
 
 // progressLine describes what the create is doing right now.

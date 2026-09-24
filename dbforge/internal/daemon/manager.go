@@ -455,17 +455,35 @@ func (m *Manager) Create(ctx context.Context, opt CreateOptions) (model.Instance
 		return model.Instance{}, fmt.Errorf("%w: %s", ErrInstanceExists, opt.ID)
 	}
 
-	image := eng.Image + ":" + version
+	// By digest, never by tag. ParseRef has already established that this
+	// version is pinned, so this cannot fail here -- but the error is returned
+	// rather than ignored, because the day someone adds a second path into
+	// this function is the day that assumption stops holding.
+	//
+	// What the digest buys: the registry can repoint postgres:16 at new code
+	// whenever it likes, and an instance created a year from now would then
+	// run something nobody looked at. image@sha256:... names one artifact, and
+	// podman verifies the bytes it receives against it, so this instance runs
+	// the same code as every other instance created from this build.
+	image, err := eng.PinnedRef(version)
+	if err != nil {
+		return model.Instance{}, err
+	}
 
-	// Validate the tag against the registry *before* creating anything, so a
-	// typo like postgres:99 fails fast and leaves nothing behind.
+	// Check for the image *before* creating anything, so a pull failure leaves
+	// nothing behind.
 	have, err := m.rt.ImageExists(ctx, image)
 	if err != nil {
 		return model.Instance{}, err
 	}
 	if !have {
 		if opt.OnProgress != nil {
-			opt.OnProgress(runtime.PullEvent{Message: "pulling " + image})
+			// Users think in versions, not digests, and a 71-character
+			// progress line helps nobody. The digest is in the instance
+			// record and in `dbctl list --json` for anyone who wants it.
+			opt.OnProgress(runtime.PullEvent{
+				Message: fmt.Sprintf("pulling %s:%s (pinned to %s)", eng.Name, version, shortDigest(image)),
+			})
 		}
 		if err := m.rt.PullImage(ctx, image, opt.OnProgress); err != nil {
 			return model.Instance{}, fmt.Errorf("image %s is not available: %w", image, err)
@@ -1041,4 +1059,19 @@ func (m *Manager) Suspend(ctx context.Context) (SuspendReport, error) {
 	}
 
 	return rep, m.save(false)
+}
+
+// shortDigest abbreviates an image reference's digest for display: the first
+// 12 hex characters, the same length git and podman show. Enough to recognise
+// and to compare against `make pins` output; the full value is what is stored
+// and what podman actually verifies.
+func shortDigest(image string) string {
+	_, digest, ok := strings.Cut(image, "@sha256:")
+	if !ok {
+		return image
+	}
+	if len(digest) > 12 {
+		digest = digest[:12]
+	}
+	return "sha256:" + digest
 }

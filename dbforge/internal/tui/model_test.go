@@ -2,12 +2,14 @@ package tui
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
-	"github.com/fiifiofosu/dbforge/internal/registry"
+	"github.com/fiifiofosu/dbforge/internal/update"
 )
 
 // "Daemon unreachable" and "no instances" must not render the same. They look
@@ -112,57 +114,66 @@ func TestPollingPausesUnderAModal(t *testing.T) {
 	}
 }
 
-// Creating while offline must show a cached list and say so (spec 7 phase 3).
-func TestOfflineVersionListIsLabelled(t *testing.T) {
+// The version list is the set of images pinned to a reviewed digest, so it is
+// the same on every machine and needs no network. The form used to fetch it
+// from Docker Hub and label a stale cache as offline; there is nothing left to
+// be offline about.
+func TestVersionListComesFromThePinnedSet(t *testing.T) {
 	m := New(nil)
 	m.view = viewCreate
 	m.create = newCreateModel()
 	m.create.step = stepVersion
-	m.create.applyVersions(m.create.engine(), registry.Result{
-		Versions:  []string{"16", "15"},
-		Source:    registry.SourceCache,
-		FetchedAt: time.Now().Add(-48 * time.Hour),
-		Err:       errors.New("dial tcp: no route to host"),
-	})
+	m.create.loadVersions(m.create.engine())
+
+	want := engines.ApprovedVersions(m.create.engine())
+	if len(want) == 0 {
+		t.Fatalf("engine %q has no pinned versions", m.create.engine())
+	}
+	if !slices.Equal(m.create.versions, want) {
+		t.Errorf("versions = %v, want the pinned set %v", m.create.versions, want)
+	}
 
 	out := m.viewCreate()
-	if !strings.Contains(out, "offline") {
-		t.Errorf("a cached version list is not labelled as offline:\n%s", out)
+	if strings.Contains(out, "offline") || strings.Contains(out, "out of date") {
+		t.Errorf("the form still warns about a stale list it can no longer have:\n%s", out)
 	}
-	if !strings.Contains(out, "cached") {
-		t.Errorf("the view does not say the list is cached:\n%s", out)
-	}
-	if !strings.Contains(out, "no route to host") {
-		t.Errorf("the view does not explain why it fell back:\n%s", out)
-	}
-}
-
-func TestLiveVersionListHasNoOfflineWarning(t *testing.T) {
-	m := New(nil)
-	m.view = viewCreate
-	m.create = newCreateModel()
-	m.create.step = stepVersion
-	m.create.applyVersions(m.create.engine(), registry.Result{
-		Versions: []string{"16"}, Source: registry.SourceLive, FetchedAt: time.Now(),
-	})
-	if out := m.viewCreate(); strings.Contains(out, "offline") {
-		t.Errorf("a live version list was labelled offline:\n%s", out)
+	for _, v := range want {
+		if !strings.Contains(out, v) {
+			t.Errorf("pinned version %q is not offered:\n%s", v, out)
+		}
 	}
 }
 
-// A version list arriving for an engine the user has moved away from must be
-// discarded, or the form shows postgres versions under redis.
-func TestStaleVersionResponseIsIgnored(t *testing.T) {
+// Every version the form offers must be one Create will accept. If these two
+// ever disagree the user picks a version from a list and is then told it is
+// not approved, which reads as a bug in the approval rather than in the list.
+func TestEveryOfferedVersionIsCreatable(t *testing.T) {
+	c := newCreateModel()
+	for _, engine := range c.engines {
+		c.engineIndex = slices.Index(c.engines, engine)
+		c.loadVersions(engine)
+		if len(c.versions) == 0 {
+			t.Errorf("engine %q offers no versions", engine)
+		}
+		for _, v := range c.versions {
+			if _, _, err := engines.ParseRef(engine + ":" + v); err != nil {
+				t.Errorf("the form offers %s:%s but creating it fails: %v", engine, v, err)
+			}
+		}
+	}
+}
+
+// A list loaded for an engine the user has moved away from must be discarded,
+// or the form shows postgres versions under redis.
+func TestVersionsForAnotherEngineAreIgnored(t *testing.T) {
 	c := newCreateModel()
 	current := c.engine()
-	c.applyVersions("some-other-engine", registry.Result{
-		Versions: []string{"999"}, Source: registry.SourceLive,
-	})
+	c.loadVersions("some-other-engine")
 	if len(c.versions) != 0 {
 		t.Fatalf("versions for a different engine were applied: %v", c.versions)
 	}
-	c.applyVersions(current, registry.Result{Versions: []string{"16"}, Source: registry.SourceLive})
-	if len(c.versions) != 1 {
+	c.loadVersions(current)
+	if len(c.versions) == 0 {
 		t.Fatal("versions for the current engine were not applied")
 	}
 }
@@ -276,5 +287,48 @@ func TestTruncate(t *testing.T) {
 	}
 	if got := truncate("averylongidentifier", 8); len([]rune(got)) != 8 {
 		t.Errorf("truncate produced %q, want 8 runes", got)
+	}
+}
+
+// The update screen reports; it must never offer to install. DBForge stopped
+// replacing its own binaries because the release it would have installed was
+// selected by a mutable pointer, and a "y to update" prompt is how that would
+// quietly come back.
+func TestUpdateScreenOffersNoInstall(t *testing.T) {
+	m := New(nil)
+	m.view = viewUpdate
+	m.update = &updateState{step: updateChecking}
+	m.width = 80
+
+	next, _, handled := m.applyUpdateMessages(updateCheckedMsg{
+		release: update.Release{Tag: "v99.0.0", Version: "99.0.0", URL: "https://example.test/r"},
+	})
+	if !handled {
+		t.Fatal("the update screen ignored its own message")
+	}
+	m = next
+
+	out := m.viewUpdate()
+	if !strings.Contains(out, "99.0.0") {
+		t.Errorf("the newer release is not reported:\n%s", out)
+	}
+	for _, forbidden := range []string{"y update", "installing", "Downloads", "SHA256SUMS"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("the update screen offers to install (%q):\n%s", forbidden, out)
+		}
+	}
+	// It has to say what to do instead, or the user is told there is an update
+	// and left with no way to get it.
+	if !strings.Contains(out, "paru") && !strings.Contains(out, "pacman") &&
+		!strings.Contains(out, "make install") {
+		t.Errorf("the update screen names no way to install the release:\n%s", out)
+	}
+
+	// Every key on this screen goes back. There is nothing else to do here.
+	for _, k := range []string{"y", "enter", "esc", "q"} {
+		out, _ := m.updateUpdate(key(k))
+		if out.(Model).view != viewList {
+			t.Errorf("%q did not leave the update screen", k)
+		}
 	}
 }

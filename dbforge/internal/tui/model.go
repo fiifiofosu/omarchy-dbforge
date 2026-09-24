@@ -12,7 +12,6 @@ import (
 	"github.com/fiifiofosu/dbforge/internal/cli"
 	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
-	"github.com/fiifiofosu/dbforge/internal/registry"
 )
 
 // view is which screen is on top.
@@ -34,8 +33,7 @@ const refreshInterval = 2 * time.Second
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	client   *cli.Client
-	registry *registry.Client
+	client *cli.Client
 
 	view     view
 	width    int
@@ -89,7 +87,6 @@ var Version = "dev"
 func New(c *cli.Client) Model {
 	return Model{
 		client:    c,
-		registry:  registry.New(),
 		view:      viewList,
 		create:    newCreateModel(),
 		passwords: map[string]string{},
@@ -145,11 +142,6 @@ type connStringMsg struct {
 	id  string
 	str string
 	err error
-}
-
-type versionsMsg struct {
-	engine string
-	result registry.Result
 }
 
 func tick() tea.Cmd {
@@ -227,17 +219,6 @@ func (m Model) fetchPassword(id string) tea.Cmd {
 	}
 }
 
-// fetchVersions refreshes an engine's version list in the background. The form
-// renders from cache immediately, so this only ever upgrades what is shown.
-func (m Model) fetchVersions(engine string) tea.Cmd {
-	reg := m.registry
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return versionsMsg{engine: engine, result: reg.Versions(ctx, engine)}
-	}
-}
-
 // selected returns the instance under the cursor.
 func (m Model) selected() (model.Instance, bool) {
 	if m.cursor < 0 || m.cursor >= len(m.instances) {
@@ -309,10 +290,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.view = viewConnection
 		return m, nil
 
-	case versionsMsg:
-		m.create.applyVersions(msg.engine, msg.result)
-		return m, nil
-
 	case pullMsg:
 		// Latest phase wins: this is a status line, not a log. The layer
 		// counter only ever grows, so a dropped message costs nothing.
@@ -331,7 +308,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.create.spinFrame++
 		return m, spinTick()
 
-	case updateCheckedMsg, updateProgressMsg, updateAppliedMsg:
+	case updateCheckedMsg:
 		next, cmd, _ := m.applyUpdateMessages(msg)
 		return next, cmd
 
@@ -469,9 +446,8 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.create = newCreateModel()
 		m.view = viewCreate
-		// Render from cache at once, then upgrade when the fetch lands.
-		m.create.applyVersions(m.create.engine(), m.registry.CachedOnly(m.create.engine()))
-		return m, m.fetchVersions(m.create.engine())
+		m.create.loadVersions(m.create.engine())
+		return m, nil
 
 	case "d":
 		if inst, ok := m.selected(); ok {

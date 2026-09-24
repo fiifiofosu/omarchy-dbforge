@@ -1,26 +1,37 @@
-// Package update replaces the installed DBForge binaries with the newest
-// published release.
+// Package update tells the user when a newer DBForge has been published.
 //
-// The design constraint is that this runs unattended from a keystroke in the
-// TUI, so every step that could go wrong quietly is made to fail loudly
-// instead: the download is checksummed against the release's own SHA256SUMS
-// before anything is replaced, the replacement is a rename within the install
-// directory (atomic, and legal even while the old binary is running), and an
-// install this process does not own -- a packaged one under /usr -- is refused
-// with the command that would do it properly rather than half-updated.
+// It used to install one as well: fetch the latest GitHub release, download
+// its binaries and its SHA256SUMS, and replace the installed executables. That
+// is gone, and deliberately.
+//
+// The problem was not the checksum. The checksum was real, and it caught a
+// download that did not match what the release listed. But the binary and the
+// list of hashes it was checked against came from the same place, chosen the
+// same way -- whatever "releases/latest" pointed at that minute. Anyone able to
+// publish or alter a release published both halves, so the check could only
+// prove the two agreed with each other, never that either was the artifact
+// anybody had reviewed. A program that replaces its own executable with code
+// selected by a mutable pointer is a supply-chain hole, whatever it hashes on
+// the way in.
+//
+// Binding it properly would mean an expected digest or signature fixed
+// independently of the release being downloaded -- which, for a version that
+// does not exist yet when the running binary is built, there is no honest way
+// to do without a signing key and verification this program does not have. So
+// the download is not fixed, it is removed. What is left reads a version
+// number and prints it. Nothing here writes to disk, and nothing here can put
+// new code on the machine: installing is the package manager's job, and it
+// already verifies packages against keys the user has decided to trust.
 package update
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,62 +39,29 @@ import (
 )
 
 // apiBase is GitHub's API root. A variable only so tests can point it at a
-// local server; nothing reads it from the environment, because "update from
-// wherever this variable says" is a way to install arbitrary binaries.
+// local server; nothing reads it from the environment.
 var apiBase = "https://api.github.com"
 
-// Repo is where releases come from. A constant rather than configuration:
-// pointing the updater at an arbitrary host is a way to install arbitrary
-// binaries, and nothing about DBForge needs it.
+// Repo is where releases are published.
 const Repo = "fiifiofosu/dbforge"
-
-// binaries are the files a release ships that an install actually contains.
-// The dbforged and dbctl names are symlinks to dbforge, so they update with it.
-var binaries = []string{"dbforge", "dbforge-tui"}
-
-// checksumAsset is the release asset listing the SHA-256 of every other one.
-const checksumAsset = "SHA256SUMS"
-
-// maxAssetBytes caps a download. The binaries are ~10 MB; anything an order of
-// magnitude past that is not a release, and streaming it to disk unbounded is
-// how a bad day becomes a full filesystem.
-const maxAssetBytes = 256 << 20
 
 // ErrNoRelease means the repository has no published release this build can
 // see -- including the case where it is private and the API denies it.
 var ErrNoRelease = errors.New("no published release found")
 
-// ErrNotOwned means the installed binaries belong to a package manager.
-type ErrNotOwned struct {
-	Dir string
-}
-
-func (e *ErrNotOwned) Error() string {
-	return fmt.Sprintf("DBForge is installed in %s, which belongs to your package manager.\n"+
-		"Update it the way it was installed, e.g.\n"+
-		"  paru -S dbforge-git      (or your AUR helper)\n"+
-		"  sudo pacman -U dbforge-git-*.pkg.tar.zst   (from the release page)", e.Dir)
-}
-
-// Release is one published version.
+// Release is one published version. It carries what is needed to tell the user
+// a newer version exists and where to read about it -- a number and a link,
+// and deliberately no download URLs.
 type Release struct {
 	Tag     string
 	Version string
 	URL     string
-	// assets maps an asset's file name to its download URL.
-	assets map[string]string
-}
-
-// Progress reports a step to the caller. Never nil inside this package.
-type Progress func(string)
-
-func (p Progress) say(format string, args ...any) {
-	if p != nil {
-		p(fmt.Sprintf(format, args...))
-	}
 }
 
 // Latest asks GitHub for the newest release.
+//
+// This is a read. It returns a version string and a URL for the user to open;
+// nothing it returns is fetched, executed or written anywhere.
 func Latest(ctx context.Context) (Release, error) {
 	url := fmt.Sprintf("%s/repos/%s/releases/latest", apiBase, Repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -113,10 +91,6 @@ func Latest(ctx context.Context) (Release, error) {
 		TagName string `json:"tag_name"`
 		HTMLURL string `json:"html_url"`
 		Draft   bool   `json:"draft"`
-		Assets  []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		} `json:"assets"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&body); err != nil {
 		return Release{}, fmt.Errorf("reading GitHub's answer: %w", err)
@@ -125,24 +99,19 @@ func Latest(ctx context.Context) (Release, error) {
 		return Release{}, ErrNoRelease
 	}
 
-	rel := Release{
+	return Release{
 		Tag:     body.TagName,
 		Version: strings.TrimPrefix(body.TagName, "v"),
 		URL:     body.HTMLURL,
-		assets:  map[string]string{},
-	}
-	for _, a := range body.Assets {
-		rel.assets[a.Name] = a.URL
-	}
-	return rel, nil
+	}, nil
 }
 
 // Newer reports whether release is a later version than current.
 //
 // A development build ("0.7.0-dev+abc123") is never treated as newer than the
 // release it is working towards, so a developer running their own build is not
-// told they are up to date when they are actually ahead -- they are offered
-// the release, and can decline.
+// told they are up to date when they are actually ahead -- they are shown the
+// release, and can ignore it.
 func Newer(current, release string) bool {
 	cur, curDev := parseVersion(current)
 	rel, _ := parseVersion(release)
@@ -195,7 +164,8 @@ func compare(a, b [3]int) int {
 	return 0
 }
 
-// InstallDir is the directory holding the running binaries.
+// InstallDir is the directory holding the running binaries. It is used only to
+// guess how DBForge was installed, so the advice names the right command.
 func InstallDir() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -208,186 +178,34 @@ func InstallDir() (string, error) {
 	return filepath.Dir(self), nil
 }
 
-// CheckWritable reports whether this process may replace the installed
-// binaries. A packaged install is refused rather than fought with: replacing
-// pacman's files leaves the package database lying about what is on disk.
-func CheckWritable(dir string) error {
+// InstallHint is how to install a new version on this machine.
+//
+// "Update it the way you installed it" is true but useless on its own, so this
+// guesses from where the binaries live and names an actual command. A wrong
+// guess costs the user a glance; there is nothing here to get wrong more
+// expensively than that, because nothing here runs the command.
+func InstallHint() string {
+	dir, err := InstallDir()
+	if err != nil {
+		dir = ""
+	}
+	packaged := false
 	for _, prefix := range []string{"/usr/", "/opt/", "/nix/"} {
 		if strings.HasPrefix(dir+"/", prefix) {
-			return &ErrNotOwned{Dir: dir}
+			packaged = true
 		}
 	}
-	// The real test, whatever the path looks like: can we write here?
-	probe, err := os.CreateTemp(dir, ".dbforge-update-probe-*")
-	if err != nil {
-		return &ErrNotOwned{Dir: dir}
+	if packaged {
+		return "DBForge was installed by your package manager (" + dir + "). Update it there:\n" +
+			"  paru -S dbforge-git      (or your AUR helper)\n" +
+			"  sudo pacman -Syu"
 	}
-	probe.Close()
-	os.Remove(probe.Name())
-	return nil
-}
-
-// Apply downloads the release and replaces the binaries in dir.
-//
-// It returns the names it replaced. Nothing is moved into place until every
-// file has been downloaded and checksummed, so a failure partway leaves the
-// installation exactly as it was.
-func Apply(ctx context.Context, rel Release, dir string, onProgress Progress) ([]string, error) {
-	if err := CheckWritable(dir); err != nil {
-		return nil, err
-	}
-
-	sums, err := fetchChecksums(ctx, rel)
-	if err != nil {
-		return nil, err
-	}
-
-	// Staged in the install directory so the final move is a rename within one
-	// filesystem: /tmp is very often a different one, and a cross-device
-	// rename is a copy, which is not atomic.
-	staging, err := os.MkdirTemp(dir, ".dbforge-update-*")
-	if err != nil {
-		return nil, fmt.Errorf("preparing a staging directory in %s: %w", dir, err)
-	}
-	defer os.RemoveAll(staging)
-
-	staged := map[string]string{}
-	for _, name := range binaries {
-		if _, ok := rel.assets[name]; !ok {
-			// A release that ships no TUI is a release this updater cannot
-			// half-apply. Say which file is missing.
-			return nil, fmt.Errorf("release %s has no %q asset", rel.Tag, name)
-		}
-		want, ok := sums[name]
-		if !ok {
-			return nil, fmt.Errorf("release %s does not checksum %q; refusing to install it",
-				rel.Tag, name)
-		}
-		onProgress.say("downloading %s", name)
-		path := filepath.Join(staging, name)
-		got, err := download(ctx, rel.assets[name], path)
-		if err != nil {
-			return nil, err
-		}
-		if got != want {
-			return nil, fmt.Errorf("%s does not match the release checksum "+
-				"(got %s, expected %s); nothing was installed", name, got[:12], want[:12])
-		}
-		onProgress.say("verified %s", name)
-		staged[name] = path
-	}
-
-	var replaced []string
-	for _, name := range binaries {
-		target := filepath.Join(dir, name)
-		if err := os.Chmod(staged[name], 0o755); err != nil {
-			return replaced, err
-		}
-		// Rename over a running binary is fine on Linux: the old inode stays
-		// alive for the processes that have it open, which is why the TUI can
-		// replace itself and why the daemon must still be restarted after.
-		if err := os.Rename(staged[name], target); err != nil {
-			return replaced, fmt.Errorf("installing %s: %w", target, err)
-		}
-		replaced = append(replaced, name)
-		onProgress.say("installed %s", name)
-	}
-	return replaced, nil
-}
-
-// RestartDaemon restarts dbforged so it runs the new binary. A daemon that
-// keeps running is still executing the code that was just replaced.
-func RestartDaemon(ctx context.Context) error {
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		out, err := exec.CommandContext(ctx, "systemctl", "--user", "restart", "dbforged").
-			CombinedOutput()
-		if err == nil {
-			return nil
-		}
-		if !strings.Contains(string(out), "not found") &&
-			!strings.Contains(string(out), "not-found") {
-			return fmt.Errorf("restarting dbforged: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-	}
-	// No unit: whoever started the daemon by hand restarts it by hand. Saying
-	// so is better than silently leaving the old one running.
-	return errors.New("update installed; restart the daemon yourself (it is not a systemd unit here)")
-}
-
-// fetchChecksums reads the release's SHA256SUMS into name -> hex digest.
-func fetchChecksums(ctx context.Context, rel Release) (map[string]string, error) {
-	url, ok := rel.assets[checksumAsset]
-	if !ok {
-		return nil, fmt.Errorf("release %s publishes no %s; refusing to install unverified binaries",
-			rel.Tag, checksumAsset)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("downloading %s: %w", checksumAsset, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("downloading %s: %s", checksumAsset, resp.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	return parseChecksums(string(body)), nil
-}
-
-// parseChecksums reads sha256sum(1) output: "<hex>  <name>" per line.
-func parseChecksums(s string) map[string]string {
-	out := map[string]string{}
-	for _, line := range strings.Split(s, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || len(fields[0]) != 64 {
-			continue
-		}
-		// A leading "*" marks binary mode; the name is the base either way,
-		// since a release lists what it publishes, not where it was built.
-		out[filepath.Base(strings.TrimPrefix(fields[1], "*"))] = strings.ToLower(fields[0])
-	}
-	return out
-}
-
-// download streams url to path and returns its SHA-256.
-func download(ctx context.Context, url, path string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := httpClient().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("downloading %s: %w", filepath.Base(path), err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("downloading %s: %s", filepath.Base(path), resp.Status)
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	sum := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, sum), io.LimitReader(resp.Body, maxAssetBytes)); err != nil {
-		return "", fmt.Errorf("downloading %s: %w", filepath.Base(path), err)
-	}
-	if err := f.Sync(); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
+	return "DBForge does not update itself. Install the new version the way you\n" +
+		"installed this one, e.g.\n" +
+		"  paru -S dbforge-git      (or your AUR helper)\n" +
+		"  git pull && make install  (from a source checkout)"
 }
 
 func httpClient() *http.Client {
-	// No redirect policy override: GitHub serves assets from a redirect to
-	// its CDN, and the checksum is what makes trusting the bytes safe.
-	return &http.Client{Timeout: 10 * time.Minute}
+	return &http.Client{Timeout: 30 * time.Second}
 }

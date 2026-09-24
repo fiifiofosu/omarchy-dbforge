@@ -39,7 +39,7 @@ UNITDIR := $(HOME)/.config/systemd/user
 endif
 
 .PHONY: build test test-package test-integration vet install install-unit uninstall \
-        dist-tarball srcinfo pkgbuild-check hook-test clean
+        dist-tarball srcinfo pkgbuild-check hook-test pins security-baseline clean
 
 build:
 	go build -tags "$(GOTAGS)" -ldflags "$(LDFLAGS)" -o dist/dbforge ./cmd/dbforge
@@ -162,6 +162,18 @@ pkgbuild-check:
 # test: stub systemctl, source them, assert on the calls.
 hook-test:
 	./packaging/aur/hook-test.sh
+
+# Regenerates the pinned engine images. DBForge runs only images named by
+# digest, and this is the reviewed path for changing that set: edit APPROVED in
+# the script, run this, and send the resulting diff to review. Needs network.
+pins:
+	./scripts/update-pins.sh
+
+# Re-establishes the supply-chain properties mechanically and writes the
+# evidence to dist/security-baseline.txt. Run on a clean checkout of the commit
+# being submitted. Needs network.
+security-baseline:
+	./scripts/security-baseline.sh
 
 clean:
 	rm -rf dist

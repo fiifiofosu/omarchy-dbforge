@@ -13,6 +13,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/fiifiofosu/dbforge/internal/daemon"
+	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
 	"github.com/fiifiofosu/dbforge/internal/store"
@@ -325,7 +327,12 @@ func TestDriftAfterExternalRemoval(t *testing.T) {
 	}
 }
 
-func TestNonexistentTagFailsFast(t *testing.T) {
+// An unpinned version must be refused against a real Podman too, and refused
+// before anything is pulled or written. "postgres:99999" does not exist
+// upstream either, but that is no longer why this fails: DBForge runs only
+// images pinned to a reviewed digest, so it never gets as far as asking the
+// registry.
+func TestUnpinnedVersionFailsFast(t *testing.T) {
 	ctx := context.Background()
 	m, _, dataRoot := newManager(t)
 
@@ -333,7 +340,11 @@ func TestNonexistentTagFailsFast(t *testing.T) {
 	_, err := m.Create(ctx, daemon.CreateOptions{Ref: "postgres:99999", ID: "it-badtag"})
 	if err == nil {
 		cleanup(t, m, "it-badtag")
-		t.Fatal("creating an instance from a nonexistent tag succeeded")
+		t.Fatal("creating an instance from an unpinned version succeeded")
+	}
+	var unapproved *engines.UnapprovedVersionError
+	if !errors.As(err, &unapproved) {
+		t.Errorf("got %v, want an UnapprovedVersionError", err)
 	}
 	t.Logf("failed in %s: %v", time.Since(start).Round(time.Millisecond), err)
 

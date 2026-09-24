@@ -239,7 +239,12 @@ func Names() []string {
 	return out
 }
 
-// ParseRef splits an "engine:version" reference, e.g. "postgres:16".
+// ParseRef splits an "engine:version" reference, e.g. "postgres:16", and
+// admits it only if that version is pinned to a reviewed digest.
+//
+// Rejecting here rather than at pull time is deliberate: this runs before
+// anything is created, so an unapproved version costs the user an error
+// message and nothing else -- no container, no data directory, no port.
 func ParseRef(ref string) (Engine, string, error) {
 	name, version, ok := strings.Cut(ref, ":")
 	if !ok || version == "" {
@@ -247,6 +252,9 @@ func ParseRef(ref string) (Engine, string, error) {
 	}
 	e, err := Get(name)
 	if err != nil {
+		return Engine{}, "", err
+	}
+	if _, err := e.PinnedRef(version); err != nil {
 		return Engine{}, "", err
 	}
 	return e, version, nil

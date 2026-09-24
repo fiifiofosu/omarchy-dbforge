@@ -35,11 +35,15 @@ Usage:
   dbctl restart-policy <id> <no|on-failure|always>
   dbctl restore
   dbctl shutdown
-  dbctl update [--check]
+  dbctl update
   dbctl engines
   dbctl doctor [--json]
 
 Engines: %s
+Run 'dbctl engines' for the versions each one can be created with. DBForge
+runs only images pinned to a reviewed digest, so that list is the whole set.
+
+'dbctl update' reports whether a newer release exists; it does not install one.
 
 Data lives under ~/.local/share/dbforge and is NOT removed by 'rm' unless
 --wipe-data is given.
@@ -86,7 +90,7 @@ func Run(ctx context.Context, args []string) int {
 	case "tui", "ui":
 		err = runTUI()
 	case "engines":
-		fmt.Println(strings.Join(engines.Names(), "\n"))
+		printEngines()
 	case "doctor":
 		err = cmdDoctor(ctx, c, rest)
 	default:
@@ -387,4 +391,16 @@ func cmdConn(ctx context.Context, c *Client, args []string) error {
 	}
 	fmt.Println(cs)
 	return nil
+}
+
+// printEngines lists each engine with the versions it can be created with.
+//
+// That list is the set of images pinned to a reviewed digest, and there is no
+// other way to find it out: DBForge does not ask a registry what tags exist,
+// because a tag it has not pinned is a tag it will refuse. So this is the
+// discoverability path, and it prints versions rather than just names.
+func printEngines() {
+	for _, name := range engines.Names() {
+		fmt.Printf("%s\t%s\n", name, strings.Join(engines.ApprovedVersions(name), " "))
+	}
 }

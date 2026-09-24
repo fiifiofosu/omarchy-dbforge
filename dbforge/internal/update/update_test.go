@@ -2,14 +2,12 @@ package update
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -46,154 +44,6 @@ func TestNewerComparesVersionsNotStrings(t *testing.T) {
 	}
 }
 
-func TestParseChecksumsReadsSha256sumOutput(t *testing.T) {
-	sums := parseChecksums(strings.Join([]string{
-		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  dbforge",
-		"da39a3ee5e6b4b0d3255bfef95601890afd80709 *dbforge-tui",
-		"5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8  dist/dbforge-0.7.0.tar.gz",
-		"",
-		"not a checksum line",
-	}, "\n"))
-	if got := sums["dbforge"]; got != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
-		t.Errorf("dbforge = %q", got)
-	}
-	// A short digest is not SHA-256 and must not be accepted as one.
-	if _, ok := sums["dbforge-tui"]; ok {
-		t.Error("a 40-character digest was accepted as SHA-256")
-	}
-	// A path in the sums file still names the asset it covers.
-	if _, ok := sums["dbforge-0.7.0.tar.gz"]; !ok {
-		t.Errorf("path-qualified entry not matched: %v", sums)
-	}
-}
-
-func TestCheckWritableRefusesAPackagedInstall(t *testing.T) {
-	var notOwned *ErrNotOwned
-	if err := CheckWritable("/usr/bin"); !errors.As(err, &notOwned) {
-		t.Fatalf("/usr/bin: got %v, want ErrNotOwned", err)
-	}
-	// The message has to say what to do instead, since the update cannot.
-	if !strings.Contains(notOwned.Error(), "pacman") {
-		t.Errorf("refusal does not name the package manager: %v", notOwned)
-	}
-	if err := CheckWritable(t.TempDir()); err != nil {
-		t.Errorf("a writable directory was refused: %v", err)
-	}
-}
-
-// fakeRelease serves a release's assets, and returns a Release pointing at it.
-func fakeRelease(t *testing.T, tag string, files map[string]string, corrupt string) Release {
-	t.Helper()
-	mux := http.NewServeMux()
-	var sums strings.Builder
-	for name, content := range files {
-		sum := sha256.Sum256([]byte(content))
-		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(sum[:]), name)
-	}
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	rel := Release{Tag: tag, Version: strings.TrimPrefix(tag, "v"), assets: map[string]string{}}
-	for name, content := range files {
-		body := content
-		if name == corrupt {
-			body = content + " tampered"
-		}
-		mux.HandleFunc("/"+name, func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprint(w, body)
-		})
-		rel.assets[name] = srv.URL + "/" + name
-	}
-	checksums := sums.String()
-	mux.HandleFunc("/"+checksumAsset, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, checksums)
-	})
-	rel.assets[checksumAsset] = srv.URL + "/" + checksumAsset
-	return rel
-}
-
-func TestApplyReplacesBinariesOnlyAfterVerifyingThem(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range binaries {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("old "+name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rel := fakeRelease(t, "v9.9.9", map[string]string{
-		"dbforge":     "new dbforge",
-		"dbforge-tui": "new dbforge-tui",
-	}, "")
-
-	replaced, err := Apply(context.Background(), rel, dir, nil)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if len(replaced) != len(binaries) {
-		t.Fatalf("replaced %v, want %v", replaced, binaries)
-	}
-	for _, name := range binaries {
-		got, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != "new "+name {
-			t.Errorf("%s = %q, want the downloaded content", name, got)
-		}
-		st, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st.Mode().Perm() != 0o755 {
-			t.Errorf("%s mode = %v, want 0755", name, st.Mode().Perm())
-		}
-	}
-	// Staging must not survive a successful update.
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".dbforge-update-") {
-			t.Errorf("staging left behind: %s", e.Name())
-		}
-	}
-}
-
-func TestApplyInstallsNothingWhenAChecksumDoesNotMatch(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range binaries {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("old "+name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// The second binary is served tampered with. The first one verifies fine,
-	// so this is exactly the case where a naive updater half-installs.
-	rel := fakeRelease(t, "v9.9.9", map[string]string{
-		"dbforge":     "new dbforge",
-		"dbforge-tui": "new dbforge-tui",
-	}, "dbforge-tui")
-
-	_, err := Apply(context.Background(), rel, dir, nil)
-	if err == nil || !strings.Contains(err.Error(), "checksum") {
-		t.Fatalf("got %v, want a checksum failure", err)
-	}
-	for _, name := range binaries {
-		got, _ := os.ReadFile(filepath.Join(dir, name))
-		if string(got) != "old "+name {
-			t.Errorf("%s was replaced despite the failure: %q", name, got)
-		}
-	}
-}
-
-func TestApplyRefusesAReleaseWithNoChecksums(t *testing.T) {
-	dir := t.TempDir()
-	rel := Release{Tag: "v9.9.9", assets: map[string]string{
-		"dbforge":     "http://example.invalid/dbforge",
-		"dbforge-tui": "http://example.invalid/dbforge-tui",
-	}}
-	_, err := Apply(context.Background(), rel, dir, nil)
-	if err == nil || !strings.Contains(err.Error(), checksumAsset) {
-		t.Fatalf("got %v, want a refusal naming %s", err, checksumAsset)
-	}
-}
-
 func TestLatestReportsAMissingReleaseDistinctly(t *testing.T) {
 	// A private repository answers 404 to an unauthenticated caller, which has
 	// the same shape as a repository with no releases at all. Both must reach
@@ -211,7 +61,7 @@ func TestLatestReportsAMissingReleaseDistinctly(t *testing.T) {
 	}
 }
 
-func TestLatestReadsTheReleaseAndItsAssets(t *testing.T) {
+func TestLatestReadsTheRelease(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"tag_name":"v0.8.0","html_url":"https://example.test/r/v0.8.0",
 			"assets":[{"name":"dbforge","browser_download_url":"https://example.test/dbforge"},
@@ -227,8 +77,49 @@ func TestLatestReadsTheReleaseAndItsAssets(t *testing.T) {
 	if rel.Version != "0.8.0" || rel.Tag != "v0.8.0" {
 		t.Errorf("version %q tag %q", rel.Version, rel.Tag)
 	}
-	if rel.assets["dbforge"] != "https://example.test/dbforge" {
-		t.Errorf("assets = %v", rel.assets)
+	if rel.URL != "https://example.test/r/v0.8.0" {
+		t.Errorf("url %q", rel.URL)
+	}
+}
+
+// The release above advertises downloadable binaries and a checksum file. This
+// package must come away with none of them: a Release carries a version number
+// and a link for the user to read, and nothing this program could fetch and
+// run. If asset URLs ever creep back into Release, the self-updater is being
+// rebuilt and this is the test that should stop it.
+func TestReleaseCarriesNothingDownloadable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v0.8.0","html_url":"https://example.test/r/v0.8.0",
+			"assets":[{"name":"dbforge","browser_download_url":"https://evil.test/dbforge"}]}`)
+	}))
+	defer srv.Close()
+	apiBase = srv.URL
+
+	rel, err := Latest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < reflect.TypeOf(rel).NumField(); i++ {
+		f := reflect.TypeOf(rel).Field(i)
+		if f.Type.Kind() != reflect.String {
+			t.Errorf("Release.%s is a %s; a release should be plain strings, "+
+				"not somewhere to keep assets", f.Name, f.Type.Kind())
+			continue
+		}
+		if v := reflect.ValueOf(rel).Field(i).String(); strings.Contains(v, "evil.test") {
+			t.Errorf("Release.%s = %q: an asset download URL reached the caller", f.Name, v)
+		}
+	}
+}
+
+// The advice has to name a command. "Update it the way you installed it" is
+// true and useless, and a user who is told only that will go looking for the
+// updater that used to be here.
+func TestInstallHintNamesAnActualCommand(t *testing.T) {
+	hint := InstallHint()
+	if !strings.Contains(hint, "paru") && !strings.Contains(hint, "pacman") &&
+		!strings.Contains(hint, "make install") {
+		t.Errorf("install hint names no command to run:\n%s", hint)
 	}
 }
 
