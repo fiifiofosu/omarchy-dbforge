@@ -1,9 +1,21 @@
 name: Release
 
-# A release is a consequence of merging to main, not a separate ritual: bump
-# dbforge/VERSION in the pull request and merging it publishes that version.
-# Merges that do not touch it release nothing, so ordinary work does not
-# produce a stream of releases nobody asked for.
+# A release is a consequence of merging to main, not a separate ritual, and
+# nobody has to remember to bump anything. Every push to main that changes
+# shipped files releases the next version, worked out from the latest v* tag:
+#
+#   patch  by default
+#   minor  if a commit since the last tag says [minor]
+#   major  if one says [major] or carries a BREAKING CHANGE footer
+#
+# Pushes that touch only documentation (*.md, docs/, .github/) release nothing.
+# Setting dbforge/VERSION by hand to an unreleased version still wins, as does
+# the version input of a manual run.
+#
+# The bump itself is a "Release vX.Y.Z" commit made by this workflow after the
+# checks pass, pushed to main together with its tag. Pushes made with the
+# default token do not trigger workflows, so that commit cannot start another
+# release.
 #
 # Pushing a v* tag by hand still releases, for the case where a release has to
 # be cut from something other than the tip of main.
@@ -22,7 +34,13 @@ on:
         type: string
 
 permissions:
-  contents: write   # create the tag and the release
+  contents: write   # commit the version, create the tag and the release
+
+# Two pushes in quick succession would otherwise both compute the same next
+# version. Queued, the second sees the first's tag and moves past it.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   # Works out what, if anything, is being released. Everything downstream is
@@ -33,6 +51,7 @@ jobs:
       release: ${{ steps.decide.outputs.release }}
       version: ${{ steps.decide.outputs.version }}
       tag: ${{ steps.decide.outputs.tag }}
+      bump: ${{ steps.decide.outputs.bump }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,32 +63,68 @@ jobs:
         run: |
           set -euo pipefail
 
+          current=$(tr -d '[:space:]' < dbforge/VERSION)
+          release=true
+
           case "${GITHUB_REF}" in
             refs/tags/v*)
               # Tag pushed by hand: it is the version, and it already exists.
               version="${GITHUB_REF#refs/tags/v}"
               ;;
             *)
-              version="${INPUT_VERSION:-$(tr -d '[:space:]' < dbforge/VERSION)}"
+              if [ -n "${INPUT_VERSION}" ]; then
+                version="${INPUT_VERSION}"
+              elif ! git rev-parse -q --verify "refs/tags/v${current}" >/dev/null; then
+                # Someone set the version by hand to one not yet released.
+                version="${current}"
+              else
+                last="v${current}"
+                # Only shipped files earn a release; a typo fix in a README
+                # should not put a new version in front of every user.
+                shipped=$(git diff --name-only "${last}" HEAD |
+                  grep -vE '\.md$|(^|/)docs/|^\.github/' || true)
+                if [ -z "$shipped" ]; then
+                  release=false
+                  version="${current}"
+                  echo "::notice::nothing shipped has changed since ${last}; nothing to release."
+                else
+                  log=$(git log --format=%B "${last}..HEAD")
+                  IFS=. read -r major minor patch <<<"${current}"
+                  if grep -qE '\[major\]|^BREAKING[ -]CHANGE:' <<<"$log"; then
+                    version="$((major + 1)).0.0"
+                  elif grep -qF '[minor]' <<<"$log"; then
+                    version="${major}.$((minor + 1)).0"
+                  else
+                    version="${major}.${minor}.$((patch + 1))"
+                  fi
+                fi
+              fi
               ;;
           esac
           tag="v${version}"
 
-          if [ -z "$version" ]; then
-            echo "no version to release"; exit 1
+          if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$version"; then
+            echo "version '${version}' is not MAJOR.MINOR.PATCH"; exit 1
           fi
 
           # An existing tag means this version is already out. Re-releasing it
           # would either fail or silently replace artefacts people already have.
-          if [ "${GITHUB_REF}" != "refs/tags/${tag}" ] && git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::${tag} already exists; nothing to release. Bump dbforge/VERSION to cut a new one."
-          else
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::releasing ${tag}"
+          if [ "$release" = true ] && [ "${GITHUB_REF}" != "refs/tags/${tag}" ] &&
+             git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            release=false
+            echo "::notice::${tag} already exists; nothing to release."
           fi
+          [ "$release" = true ] && echo "::notice::releasing ${tag}"
+
+          # The files are rewritten only when they do not already say it; a
+          # hand-set version or a pushed tag needs no commit.
+          bump=false
+          [ "$release" = true ] && [ "$version" != "$current" ] && bump=true
+
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "bump=${bump}" >> "$GITHUB_OUTPUT"
 
   # The gate. A commit that would not pass a pull request has no business
   # becoming a release. Both halves are checked: a release that ships a widget
@@ -96,8 +151,12 @@ jobs:
           released='${{ needs.decide.outputs.version }}'
           [ "$manifest" = "$daemon" ] ||
             { echo "manifest.json says $manifest, dbforge/VERSION says $daemon"; exit 1; }
-          [ "$manifest" = "$released" ] ||
-            { echo "releasing $released but the repository says $manifest"; exit 1; }
+          # When the tag job is about to write the version, the files still
+          # say the previous one; that is expected, not drift.
+          if [ '${{ needs.decide.outputs.bump }}' != true ]; then
+            [ "$manifest" = "$released" ] ||
+              { echo "releasing $released but the repository says $manifest"; exit 1; }
+          fi
           echo "version $released"
       - run: node model_test.mjs
       - run: make -C dbforge vet
@@ -108,27 +167,44 @@ jobs:
   # -- binaries, tarball, and the Arch package's own pkgver -- describes the
   # released version rather than an untagged commit.
   #
-  # If a later job fails, the tag exists without a release. Delete it and push
-  # again; that is a better failure than a release whose contents claim to be
-  # something else.
+  # If a later job fails, the tag (and its release commit) exists without a
+  # release. Delete the tag and re-run; that is a better failure than a release
+  # whose contents claim to be something else.
   tag:
     needs: [decide, verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - name: Create the tag
+      - name: Commit the version and create the tag
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         env:
           TAG: ${{ needs.decide.outputs.tag }}
+          VERSION: ${{ needs.decide.outputs.version }}
+          BUMP: ${{ needs.decide.outputs.bump }}
         run: |
           set -euo pipefail
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          refs=("refs/tags/$TAG")
+          if [ "$BUMP" = true ]; then
+            printf '%s\n' "$VERSION" > dbforge/VERSION
+            jq --arg v "$VERSION" '.version = $v' manifest.json > manifest.json.new
+            mv manifest.json.new manifest.json
+            git commit -q -am "Release $TAG"
+            # Onto the commit that was verified. If main has moved on since,
+            # this push is refused rather than releasing something unchecked;
+            # the newer push runs its own release.
+            refs+=("HEAD:refs/heads/main")
+          fi
+
           git tag -a "$TAG" -m "$TAG"
-          # Tags pushed with the default token do not re-trigger workflows, so
-          # this cannot loop back into this same run.
-          git push origin "$TAG"
+          # Both or neither: a tag on a commit main never received, or a
+          # version commit with no tag, would each leave the next run confused.
+          # Pushes made with the default token do not trigger workflows, so
+          # this cannot loop back into a new run.
+          git push --atomic origin "${refs[@]}"
 
   build:
     needs: [decide, tag]
