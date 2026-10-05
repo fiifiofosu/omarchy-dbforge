@@ -1,4 +1,5 @@
 # DBForge
+<img width="384" height="471" alt="screenshot-2026-10-05_21-46-39" src="https://github.com/user-attachments/assets/db68a069-139a-4f1c-a42b-40bbbebd4f55" />
 
 Local database instances on Omarchy — any engine, any version, side by side —
 and a bar widget to drive them. See what is running, start and stop it, and
