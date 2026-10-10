@@ -65,6 +65,31 @@ function parseList(raw) {
   return { ok: true, instances: sortForDisplay(out) }
 }
 
+// parseEngines turns `dbctl engines` into [{ name, versions }].
+//
+// Each line is "engine<TAB>v1 v2 ...", newest version first. dbctl releases
+// before the version list was added print the name alone, so an engine with
+// no versions is kept rather than dropped: the create form then asks for the
+// version as text instead of offering a list.
+function parseEngines(raw) {
+  var out = []
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim()
+    if (line === "") continue
+    var parts = line.split(/\s+/)
+    out.push({ name: parts[0], versions: parts.slice(1) })
+  }
+  return out
+}
+
+// defaultInstanceId is the id dbforged picks when --name is left out, shown
+// as the name field's placeholder so the user knows what they will get.
+function defaultInstanceId(engine, version) {
+  if (!engine) return ""
+  return String(engine) + String(version || "")
+}
+
 // sortForDisplay puts anything broken at the top, then running, then the rest,
 // with ids breaking ties so the list does not reshuffle between refreshes.
 function sortForDisplay(instances) {

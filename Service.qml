@@ -19,11 +19,17 @@ Item {
   property bool refreshing: false
   property string lastError: ""
   property string actionStatus: ""
+  // A failed start/stop/create, kept apart from lastError because every
+  // successful refresh clears that one -- and the settle poll refreshes
+  // within a second of the failure, which would wipe the reason off screen.
+  property string actionError: ""
+  property var engines: []           // [{ name, versions }] from `dbctl engines`
 
   readonly property string dbctlPath: _dbctl
   readonly property string tuiPath: _tui
   readonly property bool ready: _dbctl !== ""
   readonly property bool busy: actionProcess.running || copyProcess.running || daemonProcess.running
+  readonly property bool creating: createProcess.running
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 10, 2, 3600)
 
   property string _dbctl: ""
@@ -73,7 +79,9 @@ Item {
 
   function refresh() {
     if (!_resolved) { resolveBinaries(); return }
-    if (_dbctl === "") { missingBinary = true; return }
+    // Look again rather than settling for "missing": the installer may have
+    // just put dbctl in place, and the panel should notice on its next poll.
+    if (_dbctl === "") { _resolved = false; resolveBinaries(); return }
     if (listProcess.running) return
     refreshing = true
     listProcess.command = [_dbctl, "list", "--json"]
@@ -106,10 +114,35 @@ Item {
     else start(instance.id)
   }
 
+  function loadEngines() {
+    if (!ready || enginesProcess.running) return
+    enginesProcess.command = [_dbctl, "engines"]
+    enginesProcess.running = true
+  }
+
+  // Creating can mean pulling an image, which takes anywhere from a second to
+  // a few minutes. It runs in its own process so the switches stay usable
+  // meanwhile, and dbctl's progress lines (on stderr) become the status line.
+  // The name goes through argv for the same reason the copy does.
+  function create(ref, name) {
+    if (!ready || createProcess.running || ref === "") return
+    var command = [_dbctl, "create", ref]
+    if (name !== "") command.push("--name", name)
+    actionStatus = "Creating " + (name !== "" ? name : ref) + "…"
+    actionError = ""
+    createProcess._label = name !== "" ? name : ref
+    createProcess._lastLine = ""
+    createProcess.command = command
+    createProcess.running = true
+    // The daemon lists the instance as "creating" almost at once; show it.
+    settleTimer.ticks = 0
+    settleTimer.restart()
+  }
+
   function runAction(command, message) {
     if (!ready || actionProcess.running) return
     actionStatus = message
-    lastError = ""
+    actionError = ""
     actionProcess.command = command
     actionProcess.running = true
   }
@@ -133,6 +166,26 @@ Item {
     actionStatus = "Starting dbforged…"
     daemonProcess.command = ["systemctl", "--user", "start", "dbforged"]
     daemonProcess.running = true
+  }
+
+  // The installer ships inside the plugin folder (install.sh copies it in), so
+  // a widget installed on its own can fetch and set up DBForge from its row.
+  // It runs in a terminal because it may ask for a sudo password, and the
+  // presentation wrapper keeps the window open on its result instead of
+  // vanishing the moment it exits. setsid in both launchers detaches it from
+  // the shell, which the installer restarts at the end.
+  readonly property string installerPath: decodeURIComponent(
+    String(Qt.resolvedUrl("install-all.sh")).replace(/^file:\/\//, ""))
+
+  function runInstaller() {
+    Quickshell.execDetached([
+      "bash", "-c",
+      'if command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then\n' +
+      '  exec omarchy-launch-floating-terminal-with-presentation "bash $(printf %q "$1")"\n' +
+      'fi\n' +
+      'exec setsid uwsm-app -- xdg-terminal-exec -e bash -c \'bash "$1"; read -rp "Press Enter to close"\' bash "$1"\n',
+      "bash", installerPath
+    ])
   }
 
   function openTui() {
@@ -177,7 +230,11 @@ Item {
     onTriggered: {
       ticks += 1
       root.refresh()
-      if (ticks >= 6) { ticks = 0; running = false; root.actionStatus = "" }
+      if (ticks >= 6) {
+        ticks = 0
+        running = false
+        if (!createProcess.running) root.actionStatus = ""
+      }
     }
   }
 
@@ -185,7 +242,7 @@ Item {
     id: actionStatusTimer
     interval: 2400
     repeat: false
-    onTriggered: root.actionStatus = ""
+    onTriggered: if (!createProcess.running) root.actionStatus = ""
   }
 
   Process {
@@ -199,7 +256,10 @@ Item {
       root._tui = String(lines[1] || "").trim()
       root._resolved = true
       root.missingBinary = root._dbctl === ""
-      if (root._dbctl !== "") root.refresh()
+      if (root._dbctl !== "") {
+        root.refresh()
+        root.loadEngines()
+      }
     }
   }
 
@@ -233,7 +293,48 @@ Item {
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        root.lastError = Model.elide(String(actionErr.text || actionOut.text || "") || "Command failed")
+        root.actionError = Model.elide(String(actionErr.text || actionOut.text || "") || "Command failed")
+        root.actionStatus = ""
+      }
+      settleTimer.ticks = 0
+      settleTimer.restart()
+      root.refresh()
+    }
+  }
+
+  Process {
+    id: enginesProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: enginesOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.engines = Model.parseEngines(String(enginesOut.text || ""))
+    }
+  }
+
+  Process {
+    id: createProcess
+    property string _label: ""
+    property string _lastLine: ""
+    running: false
+    command: []
+    stdout: StdioCollector { id: createOut; waitForEnd: true }
+    stderr: SplitParser {
+      onRead: function(line) {
+        var text = String(line || "").trim()
+        if (text === "") return
+        createProcess._lastLine = text
+        root.actionStatus = Model.elide("Creating " + createProcess._label + ": " + text)
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        // First stdout line is "Created <id> (<engine>:<version>) on port N".
+        var first = String(createOut.text || "").split("\n")[0].trim()
+        root.actionStatus = first !== "" ? first : "Created " + createProcess._label
+        actionStatusTimer.restart()
+      } else {
+        root.actionError = Model.elide(createProcess._lastLine || "Could not create " + createProcess._label)
         root.actionStatus = ""
       }
       settleTimer.ticks = 0

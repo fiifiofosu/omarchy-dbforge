@@ -20,7 +20,8 @@ const source = readFileSync(join(here, "Model.js"), "utf8").replace(/^\.pragma l
 const Model = {}
 new Function("exports", source + "\n" + [
   "parseList", "summarize", "summaryText", "barLabel",
-  "statusWord", "severity", "rowMeta", "isRunning", "isActionable", "elide"
+  "statusWord", "severity", "rowMeta", "isRunning", "isActionable", "elide",
+  "parseEngines", "defaultInstanceId"
 ].map(n => `exports.${n} = ${n}`).join("\n"))(Model)
 
 let failures = 0
@@ -87,6 +88,18 @@ eq(Model.isActionable({ status: "stopped" }), true, "stopped can be started")
 eq(Model.rowMeta({ engine: "postgres", version: "18", port: 15432, status: "running" }),
    "postgres:18  ·  :15432  ·  running", "row meta reads as one line")
 eq(Model.elide("a ".repeat(200), 20).length, 20, "long errors are capped")
+
+// `dbctl engines` lists versions newest first after a tab. Older dbctl prints
+// the name alone, and the create form has to cope with that rather than offer
+// an empty version list.
+eq(Model.parseEngines("postgres\t18 17 16\nredis\t8 7\n"),
+   [{ name: "postgres", versions: ["18", "17", "16"] }, { name: "redis", versions: ["8", "7"] }],
+   "engines carry their versions")
+eq(Model.parseEngines("mariadb\nmysql\n"),
+   [{ name: "mariadb", versions: [] }, { name: "mysql", versions: [] }],
+   "an older dbctl lists names only")
+eq(Model.parseEngines(""), [], "no output is no engines")
+eq(Model.defaultInstanceId("postgres", "18"), "postgres18", "default id matches dbforged")
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)
