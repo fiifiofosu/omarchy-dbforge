@@ -19,13 +19,15 @@ DEST="${OMARCHY_PLUGIN_DIR:-$HOME/.config/omarchy/plugins}/$PLUGIN_ID"
 # non-interactive shell, where the default is to install without enabling.
 ENABLE=""
 RESTART=yes
+FORCE_COPY=no
 for arg in "$@"; do
   case "$arg" in
     --enable) ENABLE=yes ;;
     --no-enable) ENABLE=no ;;
     --no-restart) RESTART=no ;;
+    --copy) FORCE_COPY=yes ;;
     -h|--help)
-      echo "Usage: install.sh [--enable | --no-enable] [--no-restart]"
+      echo "Usage: install.sh [--enable | --no-enable] [--no-restart] [--copy]"
       exit 0
       ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -67,6 +69,18 @@ is_enabled && WAS_ENABLED=yes
 # refuses to copy a file onto itself.
 SAME_DIR=no
 [ "$(cd "$DEST" 2>/dev/null && pwd -P)" = "$(cd "$HERE" && pwd -P)" ] && SAME_DIR=yes
+
+# Installed with `omarchy plugin add`, the plugin folder is a git checkout that
+# `omarchy plugin update` fast-forwards. Copying files over it leaves local
+# changes, and from then on every update refuses to run. So bring it up to
+# date the way Omarchy does instead. --copy overrides that, for testing
+# uncommitted work; undo it afterwards with: git -C "$DEST" checkout -- .
+if [ "$SAME_DIR" = no ] && [ "$FORCE_COPY" = no ] && [ -d "$DEST/.git" ]; then
+  say "The widget is managed by omarchy plugin add; updating it from git"
+  omarchy plugin update "$PLUGIN_ID" --yes >/dev/null ||
+    die "could not update $DEST; see: omarchy plugin update $PLUGIN_ID"
+  SAME_DIR=yes
+fi
 
 mkdir -p "$DEST"
 # Copy only what the plugin actually needs. The installers and the test are for

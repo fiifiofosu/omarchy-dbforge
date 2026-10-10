@@ -144,6 +144,13 @@ installer's. So it asks first, and installs without enabling if you decline or
 if there is no terminal to ask in. `--enable` and `--no-enable` answer ahead of
 time.
 
+If the widget was installed with `omarchy plugin add`, its folder is a git
+checkout, and `./install.sh` updates it through `omarchy plugin update` rather
+than copying over it — copied files would count as local changes and block
+every later update. `--copy` forces the copy, for testing uncommitted work;
+`git -C ~/.config/omarchy/plugins/io.github.fiifiofosu.dbforge checkout -- .`
+undoes it.
+
 The plugin is copied rather than symlinked, because Omarchy rejects symlinks
 inside a plugin folder — so a clone install does not update itself. Re-run
 `./install.sh` after pulling, or use `omarchy plugin add` above and let Omarchy
