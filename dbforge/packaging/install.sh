@@ -45,8 +45,13 @@ systemctl --user daemon-reload
 # starting the daemon starts the socket, and enabling the daemon brings both up
 # at login. Enabling it here as well would only add a second thing to keep in
 # step with the first.
-say "Enabling and starting dbforged"
-systemctl --user enable --now dbforged
+# `enable --now` starts a stopped daemon but leaves a running one alone, so on
+# an upgrade the old binary would keep serving. Restart instead: it starts the
+# daemon if it is down, and swaps in the new binary if it is up. The databases
+# are Podman containers and keep running through it.
+say "Enabling and (re)starting dbforged"
+systemctl --user enable dbforged
+systemctl --user restart dbforged
 
 # Without lingering, the systemd user manager is torn down at logout, taking
 # the daemon and every database with it -- and nothing starts at boot until

@@ -18,12 +18,14 @@ DEST="${OMARCHY_PLUGIN_DIR:-$HOME/.config/omarchy/plugins}/$PLUGIN_ID"
 # --enable/--no-enable answer ahead of time, for scripts and for a
 # non-interactive shell, where the default is to install without enabling.
 ENABLE=""
+RESTART=yes
 for arg in "$@"; do
   case "$arg" in
     --enable) ENABLE=yes ;;
     --no-enable) ENABLE=no ;;
+    --no-restart) RESTART=no ;;
     -h|--help)
-      echo "Usage: install.sh [--enable | --no-enable]"
+      echo "Usage: install.sh [--enable | --no-enable] [--no-restart]"
       exit 0
       ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -49,23 +51,63 @@ command -v dbctl >/dev/null 2>&1 ||
 omarchy plugin validate "$HERE" || die "plugin validation failed"
 say "Validated $PLUGIN_ID"
 
+# Whether the widget is on the bar already decides two things below: there is
+# nothing to ask about enabling, and the running shell is holding the old
+# version in memory. `omarchy plugin list --json` prints one object per plugin
+# on a single line, so a pattern bounded by the closing brace stays inside this
+# plugin's own entry.
+is_enabled() {
+  omarchy plugin list --json 2>/dev/null |
+    grep -q "\"id\":\"$PLUGIN_ID\"[^}]*\"enabled\":true"
+}
+WAS_ENABLED=no
+is_enabled && WAS_ENABLED=yes
+
+# Run from inside the plugin folder there is nothing to copy, and `install`
+# refuses to copy a file onto itself.
+SAME_DIR=no
+[ "$(cd "$DEST" 2>/dev/null && pwd -P)" = "$(cd "$HERE" && pwd -P)" ] && SAME_DIR=yes
+
 mkdir -p "$DEST"
 # Copy only what the plugin actually needs. The installers and the test are for
 # people reading the repo, not for the shell to load; the README and LICENSE
-# come along so the installed folder can still say what it is and under what
-# terms.
-for f in manifest.json Panel.qml Service.qml DbForgeIcon.qml Model.js README.md LICENSE; do
-  install -m 0644 "$HERE/$f" "$DEST/$f"
-done
+# terms. install-all.sh comes too: the panel's "Install DBForge" row runs it.
+if [ "$SAME_DIR" = no ]; then
+  for f in manifest.json Panel.qml Service.qml DbForgeIcon.qml Model.js README.md LICENSE; do
+    install -m 0644 "$HERE/$f" "$DEST/$f"
+  done
+  install -m 0755 "$HERE/install-all.sh" "$DEST/install-all.sh"
+fi
 say "Installed to $DEST"
 
-# A running shell has already scanned its plugin directory, and it cannot
-# enable a plugin it has not discovered yet -- that fails with
-# "PluginRegistry.setEnabled: unknown plugin". So rescan first, then enable.
-if omarchy-shell shell rescanPlugins >/dev/null 2>&1; then
-  say "Rescanned plugins"
-else
+shell_running() { omarchy-shell shell ping >/dev/null 2>&1; }
+
+if ! shell_running; then
   warn "omarchy-shell is not running; the widget appears on next login"
+  [ "$WAS_ENABLED" = yes ] && exit 0
+elif [ "$WAS_ENABLED" = yes ]; then
+  # An update to a widget the shell already has loaded. Rescanning reloads the
+  # plugin list, but the shell keeps serving the old Panel.qml and Model.js
+  # out of its QML engine, so the new version would not show until the next
+  # login. Restarting the shell is the step that actually swaps it in; it
+  # blinks the bar for a moment and touches nothing else.
+  if [ "$RESTART" = yes ]; then
+    say "Restarting the Omarchy shell to load the new version"
+    if omarchy restart shell >/dev/null 2>&1; then
+      say "Done. The widget is updated and still on your bar."
+    else
+      warn "could not restart the shell; run: omarchy restart shell"
+    fi
+  else
+    say "Installed. Run 'omarchy restart shell' to load the new version."
+  fi
+  exit 0
+else
+  # A running shell has already scanned its plugin directory, and it cannot
+  # enable a plugin it has not discovered yet -- that fails with
+  # "PluginRegistry.setEnabled: unknown plugin". So rescan first, then enable.
+  omarchy-shell shell rescanPlugins >/dev/null 2>&1
+  say "Rescanned plugins"
 fi
 
 if [ -z "$ENABLE" ]; then

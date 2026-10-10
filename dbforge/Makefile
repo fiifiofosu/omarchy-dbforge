@@ -38,7 +38,7 @@ else
 UNITDIR := $(HOME)/.config/systemd/user
 endif
 
-.PHONY: build test test-package test-integration vet install install-unit uninstall \
+.PHONY: build test test-package test-integration vet install install-unit uninstall restart-if-running \
         dist-tarball srcinfo pkgbuild-check hook-test pins security-baseline clean
 
 build:
@@ -98,7 +98,20 @@ install: build dist/dbforged.service
 		$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/dbforge.svg
 	install -Dm644 README.md $(DESTDIR)$(PREFIX)/share/doc/dbforge/README.md
 	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/dbforge/LICENSE
-	@[ -n "$(DESTDIR)" ] || $(MAKE) --no-print-directory post-install-notes
+	@[ -n "$(DESTDIR)$(FROM_INSTALL_ALL)" ] || $(MAKE) --no-print-directory restart-if-running
+	@[ -n "$(DESTDIR)$(FROM_INSTALL_ALL)" ] || $(MAKE) --no-print-directory post-install-notes
+
+# A daemon that is already running keeps executing the binary it started from,
+# so an upgrade is not live until it restarts -- and nothing tells you that.
+# Restarting is safe: the containers belong to Podman, not to dbforged, so they
+# keep running through it, and the new daemon reattaches to them on start.
+# A daemon that is not running is left alone; packaging/install.sh starts it.
+restart-if-running:
+	@if systemctl --user is-active --quiet dbforged 2>/dev/null; then \
+		systemctl --user daemon-reload; \
+		systemctl --user restart dbforged && \
+			echo "Restarted dbforged on the new binary ($$($(BINDIR)/dbctl version))"; \
+	fi
 
 post-install-notes:
 	@echo

@@ -2,8 +2,8 @@
 <img width="384" height="471" alt="screenshot-2026-10-05_21-46-39" src="https://github.com/user-attachments/assets/db68a069-139a-4f1c-a42b-40bbbebd4f55" />
 
 Local database instances on Omarchy — any engine, any version, side by side —
-and a bar widget to drive them. See what is running, start and stop it, and
-copy a connection string, without leaving the bar.
+and a bar widget to drive them. See what is running, start and stop it,
+create a new instance, and copy a connection string, without leaving the bar.
 
 The widget is a front end. The thing it drives is **DBForge**, a daemon that
 runs local Postgres, MySQL and Redis instances as rootless Podman containers,
@@ -46,19 +46,43 @@ and writes nothing outside the commands below.
 |---|---|---|
 | `sh` | on load, and to copy | Resolves the binaries below; pipes `dbctl conn` into `wl-copy` without letting an instance id reach a shell as text |
 | `dbctl list --json` | every refresh | Reads instance state |
-| `dbctl start` / `stop <id>` | the row switch | The only state this widget changes |
+| `dbctl start` / `stop <id>` | the row switch | Starts or stops an instance |
+| `dbctl engines` | on load | Lists the engines and versions the create form offers |
+| `dbctl create <engine:version> [--name ID]` | the create form | Creates and starts a new instance; destroying stays in the TUI |
 | `dbctl conn <id>` | copy action | Produces the connection string |
 | `wl-copy` | copy action | Puts it on the clipboard |
 | `systemctl --user start dbforged` | the offline row | Starts the daemon, when you ask it to |
 | `omarchy-launch-tui`, or `uwsm-app` / `xdg-terminal-exec` | terminal action | Opens the DBForge TUI |
+| `install-all.sh` in a terminal | the "Install DBForge" row, only when dbctl is missing | Installs DBForge and what it needs; asks for sudo in the terminal, never from the shell |
 
 Connection strings contain generated passwords. They go to the clipboard only
 when you ask for them, and are never written to a file or logged.
 
 ## Install
 
-Two halves, installed separately. DBForge first, or the widget will have
-nothing to talk to:
+One command installs everything, and running it again upgrades:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fiifiofosu/omarchy-dbforge/main/install-all.sh | bash
+```
+
+It installs whatever is missing — `git`, `make`, `go`, `podman`,
+`wl-clipboard` (via pacman, so it asks for your sudo password once) — gives
+your user rootless container ids if it has none, downloads the source to
+`~/.local/src/omarchy-dbforge`, builds and installs DBForge, starts its daemon
+(or restarts it on the new binary — your databases keep running), keeps your
+databases running across logout, and puts the widget on your bar.
+
+Already have a clone? `make install-all` (or `./install-all.sh`) does the same
+from it. Installed the widget first with `omarchy plugin add`? Its panel shows
+an **Install DBForge** row that runs the same installer in a terminal.
+
+The rest of this section is the same thing in pieces, for when you only want
+one half.
+
+### DBForge on its own
+
+DBForge first, or the widget will have nothing to talk to:
 
 ```bash
 git clone https://github.com/fiifiofosu/omarchy-dbforge
@@ -67,11 +91,14 @@ make install && ./packaging/install.sh
 ```
 
 That builds `dbforge`, `dbctl` and `dbforge-tui` into `~/.local/bin`, installs
-the systemd user unit, and enables the daemon. It needs Go 1.26+ and rootless
+the systemd user unit, and enables the daemon. Re-running it after a pull
+restarts a running daemon on the new binary; the databases are Podman
+containers and keep running through the restart. It needs Go 1.26+ and rootless
 Podman; `dbforge/README.md` covers the requirements and `dbctl doctor` checks
 them.
 
-Then the widget:
+### The widget on its own
+
 
 ```bash
 omarchy plugin add https://github.com/fiifiofosu/omarchy-dbforge --enable
@@ -82,8 +109,11 @@ the manifest, asks before enabling, and lets you pick a bar section. Later
 versions arrive with:
 
 ```bash
-omarchy plugin update io.github.fiifiofosu.dbforge
+omarchy plugin update io.github.fiifiofosu.dbforge && omarchy restart shell
 ```
+
+The restart is needed because `omarchy plugin update` only asks the shell to
+rescan, and a rescan leaves the widget it already loaded running the old code.
 
 Move it along the bar with:
 
@@ -102,8 +132,11 @@ cd omarchy-dbforge
 ```
 
 That validates the manifest, copies the plugin into
-`~/.config/omarchy/plugins/io.github.fiifiofosu.dbforge/`, and asks a running
-shell to rescan.
+`~/.config/omarchy/plugins/io.github.fiifiofosu.dbforge/`, and loads it into a
+running shell. When an older version of the widget is already on your bar, a
+rescan is not enough — the shell keeps the old panel in memory — so the
+installer restarts the shell (`omarchy restart shell`), which blinks the bar
+and nothing else. `--no-restart` skips that and leaves it for you.
 
 Putting the widget on your bar is a separate question, because it edits
 `~/.config/omarchy/shell.json`, which is your configuration and not the

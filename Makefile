@@ -11,7 +11,7 @@ OMARCHY_SHELL ?= /usr/share/omarchy/shell
 QMLLINT       ?= /usr/lib/qt6/bin/qmllint
 QML            = Panel.qml Service.qml DbForgeIcon.qml
 
-.PHONY: check test validate lint version install uninstall \
+.PHONY: check test validate lint version install install-all uninstall \
         dbforge dbforge-test dbforge-install
 
 check: version test validate lint
@@ -50,6 +50,13 @@ lint:
 
 install:
 	./install.sh
+
+# Everything, from a fresh clone or as an upgrade after a pull: missing
+# packages, rootless ids, DBForge and its daemon, and the widget on the bar.
+# install-all.sh is the real entry point -- it also runs without make, and
+# from the widget's own "Install DBForge" row.
+install-all:
+	./install-all.sh
 
 uninstall:
 	./uninstall.sh
