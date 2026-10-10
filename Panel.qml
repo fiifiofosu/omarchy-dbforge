@@ -31,6 +31,7 @@ Panel {
   // the dropdowns because the version list depends on the engine, and the
   // dropdowns' own `value` stops following a binding once a user picks.
   property bool createOpen: false
+  property SafeTextField pasteTarget: null
   property string createEngine: ""
   property string createVersion: ""
   readonly property var createVersions: versionsFor(createEngine)
@@ -206,6 +207,10 @@ Panel {
     function onInstancesChanged() { root.clampCursor() }
     // The engine list can arrive after the form has opened.
     function onEnginesChanged() { root.pickDefaultEngine() }
+    function onClipboardRead(text) {
+      if (root.pasteTarget && root.createOpen) root.pasteTarget.insertPasted(text)
+      root.pasteTarget = null
+    }
   }
 
   IpcHandler {
@@ -411,8 +416,10 @@ Panel {
             // An older dbctl names its engines but not their versions, so
             // the version is typed instead; dbforged rejects any it has not
             // pinned, and that error lands in the status line.
-            TextField {
+            SafeTextField {
               id: versionField
+              allowed: /[0-9A-Za-z.]/
+              maximumLength: 16
               visible: root.createVersions.length === 0
               Layout.fillWidth: true
               Layout.preferredWidth: 1
@@ -423,8 +430,12 @@ Panel {
             }
           }
 
-          TextField {
+          // Same character set and length dbforged's validateID accepts, so
+          // a bad name is refused as it is typed rather than after a create.
+          SafeTextField {
             id: nameField
+            allowed: /[A-Za-z0-9_-]/
+            maximumLength: 48
             width: parent.width
             foreground: root.foreground
             placeholderText: root.createEngine === ""
@@ -512,6 +523,57 @@ Panel {
           }
         }
       }
+    }
+  }
+
+  // A TextField whose clipboard never touches the shell's own thread.
+  //
+  // Qt's native paste (Ctrl+V, Shift+Insert, middle-click on the primary
+  // selection, and the right-click menu Qt 6.9+ adds) reads the Wayland
+  // clipboard synchronously inside the shell process, with no deadline and
+  // no size limit -- a source that keeps streaming would stall every panel
+  // and grow the shell's memory. So all four are closed off here, and the
+  // keyboard paste goes through Service.readClipboard instead: wl-paste in a
+  // child process, cut off after a second and a few hundred bytes. What comes
+  // back is filtered to `allowed` and trimmed to maximumLength before it is
+  // inserted, so a paste can never put text in the field that typing could
+  // not.
+  component SafeTextField: TextField {
+    id: field
+    property var allowed: /./
+
+    function insertPasted(raw) {
+      var clean = ""
+      var text = String(raw || "")
+      for (var i = 0; i < text.length; i++) {
+        if (allowed.test(text[i])) clean += text[i]
+      }
+      if (selectedText !== "") remove(selectionStart, selectionEnd)
+      clean = clean.substring(0, Math.max(0, maximumLength - length))
+      if (clean !== "") insert(cursorPosition, clean)
+    }
+
+    validator: RegularExpressionValidator {
+      regularExpression: new RegExp("^" + field.allowed.source + "*$")
+    }
+    foreground: root.foreground
+    ContextMenu.menu: null
+
+    Keys.onPressed: function(event) {
+      if (event.matches(StandardKey.Paste)) {
+        root.pasteTarget = field
+        db.readClipboard()
+        event.accepted = true
+      }
+    }
+
+    // Middle-click would paste the primary selection, right-click opens the
+    // menu with Paste in it. Taking both buttons here leaves left-click
+    // (focus, cursor, selection) to the field itself.
+    MouseArea {
+      anchors.fill: parent
+      acceptedButtons: Qt.MiddleButton | Qt.RightButton
+      onPressed: field.forceActiveFocus()
     }
   }
 

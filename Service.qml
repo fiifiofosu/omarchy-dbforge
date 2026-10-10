@@ -37,6 +37,7 @@ Item {
   property bool _resolved: false
 
   signal copied(string label)
+  signal clipboardRead(string text)
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -159,6 +160,16 @@ Item {
     ]
     copyProcess._label = instance.id
     copyProcess.running = true
+  }
+
+  // The create form's paste. wl-paste runs in a child so a clipboard source
+  // that stalls or never stops streaming costs that child, not the shell:
+  // `timeout` bounds how long it can take and `head -c` how much of it ever
+  // reaches this process. 256 bytes is several times the longest thing the
+  // form accepts (a 48-character name); the rest is never read.
+  function readClipboard() {
+    if (pasteProcess.running) return
+    pasteProcess.running = true
   }
 
   function startDaemon() {
@@ -359,6 +370,17 @@ Item {
       }
       actionStatusTimer.restart()
     }
+  }
+
+  Process {
+    id: pasteProcess
+    running: false
+    command: [
+      "sh", "-c",
+      'timeout 1 wl-paste --no-newline --type text 2>/dev/null | head -c 256'
+    ]
+    stdout: StdioCollector { id: pasteOut; waitForEnd: true }
+    onExited: root.clipboardRead(String(pasteOut.text || ""))
   }
 
   Process {
