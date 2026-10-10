@@ -526,54 +526,172 @@ Panel {
     }
   }
 
-  // A TextField whose clipboard never touches the shell's own thread.
+  // A one-line text input that never touches the clipboard on its own.
   //
-  // Qt's native paste (Ctrl+V, Shift+Insert, middle-click on the primary
-  // selection, and the right-click menu Qt 6.9+ adds) reads the Wayland
-  // clipboard synchronously inside the shell process, with no deadline and
-  // no size limit -- a source that keeps streaming would stall every panel
-  // and grow the shell's memory. So all four are closed off here, and the
-  // keyboard paste goes through Service.readClipboard instead: wl-paste in a
-  // child process, cut off after a second and a few hundred bytes. What comes
-  // back is filtered to `allowed` and trimmed to maximumLength before it is
-  // inserted, so a paste can never put text in the field that typing could
-  // not.
-  component SafeTextField: TextField {
+  // It is deliberately not a Qt TextField or TextInput. Every editable Qt
+  // text input subscribes to clipboard changes to keep its canPaste state
+  // current, and on Wayland that means reading whatever a foreign client
+  // offers -- synchronously, on the shell's thread, with no deadline or size
+  // limit -- whenever the selection changes, whether or not anyone pastes.
+  // Blocking the paste shortcuts cannot stop that; not being a text input
+  // does. So this is a Text with its own cursor and key handling, and the
+  // only way clipboard data reaches it is Service.readClipboard: wl-paste in
+  // a child process, cut off after a second and 256 bytes.
+  //
+  // It accepts only characters matching `allowed`, up to maximumLength, so a
+  // paste can never put text in the field that typing could not.
+  component SafeTextField: BorderSurface {
     id: field
+
+    property string text: ""
+    property string placeholderText: ""
     property var allowed: /./
+    property int maximumLength: 64
+    property int cursorPosition: text.length
+    property color foreground: root.foreground
 
-    function insertPasted(raw) {
+    signal accepted()
+
+    function clamp(n) { return Math.max(0, Math.min(text.length, n)) }
+
+    function insertText(raw) {
       var clean = ""
-      var text = String(raw || "")
-      for (var i = 0; i < text.length; i++) {
-        if (allowed.test(text[i])) clean += text[i]
+      var s = String(raw || "")
+      for (var i = 0; i < s.length; i++) {
+        if (allowed.test(s[i])) clean += s[i]
       }
-      if (selectedText !== "") remove(selectionStart, selectionEnd)
-      clean = clean.substring(0, Math.max(0, maximumLength - length))
-      if (clean !== "") insert(cursorPosition, clean)
+      clean = clean.substring(0, Math.max(0, maximumLength - text.length))
+      if (clean === "") return
+      var at = clamp(cursorPosition)
+      text = text.substring(0, at) + clean + text.substring(at)
+      cursorPosition = at + clean.length
     }
 
-    validator: RegularExpressionValidator {
-      regularExpression: new RegExp("^" + field.allowed.source + "*$")
-    }
-    foreground: root.foreground
-    ContextMenu.menu: null
+    function insertPasted(raw) { insertText(raw) }
+
+    onTextChanged: cursorPosition = clamp(cursorPosition)
+
+    readonly property bool _focused: activeFocus
+    readonly property bool _hot: hover.hovered
+    readonly property var _borderSpec: Border.controlSpec(_focused ? "focus" : (_hot ? "hover-cursor" : "normal"), foreground, Color.accent)
+
+    color: Style.controlFill(_focused, _hot, foreground, Color.accent)
+    borderSpec: _borderSpec
+    radius: Style.cornerRadius
+    activeFocusOnTab: true
+    implicitWidth: Style.spacing.dropdownWidth
+    implicitHeight: label.implicitHeight + Style.spacing.inputPaddingY * 2
+      + Border.top(_borderSpec) + Border.bottom(_borderSpec)
 
     Keys.onPressed: function(event) {
+      var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
       if (event.matches(StandardKey.Paste)) {
         root.pasteTarget = field
         db.readClipboard()
-        event.accepted = true
+      } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+        field.accepted()
+      } else if (event.key === Qt.Key_Backspace) {
+        if (ctrl) {
+          text = text.substring(cursorPosition)
+          cursorPosition = 0
+        } else if (cursorPosition > 0) {
+          var at = cursorPosition
+          text = text.substring(0, at - 1) + text.substring(at)
+          cursorPosition = at - 1
+        }
+      } else if (event.key === Qt.Key_Delete) {
+        text = text.substring(0, cursorPosition) + text.substring(cursorPosition + 1)
+      } else if (event.key === Qt.Key_Left) {
+        cursorPosition = clamp(cursorPosition - 1)
+      } else if (event.key === Qt.Key_Right) {
+        cursorPosition = clamp(cursorPosition + 1)
+      } else if (event.key === Qt.Key_Home || (ctrl && event.key === Qt.Key_A)) {
+        cursorPosition = 0
+      } else if (event.key === Qt.Key_End || (ctrl && event.key === Qt.Key_E)) {
+        cursorPosition = text.length
+      } else if (ctrl && event.key === Qt.Key_U) {
+        text = ""
+      } else if (!ctrl && event.text !== "" && event.key !== Qt.Key_Escape
+                 && event.key !== Qt.Key_Tab && event.key !== Qt.Key_Backtab) {
+        insertText(event.text)
+      } else {
+        return // Escape, Tab and the rest go on to the caller and the panel
+      }
+      cursorBlink.restart()
+      cursorBar.visible = true
+      event.accepted = true
+    }
+
+    HoverHandler { id: hover; cursorShape: Qt.IBeamCursor }
+
+    // Any button focuses; none of them pastes. Left-click puts the cursor at
+    // the end -- this is a field for a short name, not an editor.
+    MouseArea {
+      anchors.fill: parent
+      acceptedButtons: Qt.AllButtons
+      onPressed: {
+        field.forceActiveFocus()
+        field.cursorPosition = field.text.length
       }
     }
 
-    // Middle-click would paste the primary selection, right-click opens the
-    // menu with Paste in it. Taking both buttons here leaves left-click
-    // (focus, cursor, selection) to the field itself.
-    MouseArea {
+    Item {
+      id: viewport
       anchors.fill: parent
-      acceptedButtons: Qt.MiddleButton | Qt.RightButton
-      onPressed: field.forceActiveFocus()
+      anchors.leftMargin: Style.spacing.controlPaddingX + Border.left(field._borderSpec)
+      anchors.rightMargin: Style.spacing.controlPaddingX + Border.right(field._borderSpec)
+      clip: true
+
+      TextMetrics {
+        id: beforeCursor
+        font: label.font
+        text: field.text.substring(0, field.cursorPosition)
+      }
+
+      // Scroll so the cursor stays in view once the text is wider than the
+      // field.
+      readonly property real cursorX: beforeCursor.advanceWidth
+      readonly property real scrollX: Math.max(0, cursorX - width + 2)
+
+      Text {
+        id: label
+        textFormat: Text.PlainText
+        x: -viewport.scrollX
+        anchors.verticalCenter: parent.verticalCenter
+        text: field.text
+        color: field.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: field.text === ""
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width
+        text: field.placeholderText
+        color: Qt.darker(field.foreground, 1.6)
+        font: label.font
+        elide: Text.ElideRight
+      }
+
+      Rectangle {
+        id: cursorBar
+        visible: field.activeFocus
+        x: viewport.cursorX - viewport.scrollX
+        width: 1
+        height: label.font.pixelSize + Style.space(4)
+        anchors.verticalCenter: parent.verticalCenter
+        color: field.foreground
+      }
+
+      Timer {
+        id: cursorBlink
+        interval: 530
+        repeat: true
+        running: field.activeFocus
+        onTriggered: cursorBar.visible = !cursorBar.visible
+      }
     }
   }
 
