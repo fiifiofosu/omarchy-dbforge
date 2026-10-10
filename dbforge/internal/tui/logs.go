@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fiifiofosu/dbforge/internal/cli"
+	"github.com/fiifiofosu/dbforge/internal/termsafe"
 )
 
 // maxLogLines caps what we keep in memory. A chatty database would otherwise
@@ -122,8 +123,12 @@ func (l *logsModel) stop() {
 	l.once.Do(func() { l.cancel() })
 }
 
+// append stores a line already made safe to print. Log text is written by
+// whoever can reach the database, so it can carry escape sequences aimed at
+// the terminal (OSC 52 sets the clipboard); termsafe strips them here, once,
+// before the line is stored, rendered or truncated by byte width.
 func (l *logsModel) append(line logLineMsg) {
-	l.lines = append(l.lines, string(line))
+	l.lines = append(l.lines, termsafe.Line(string(line)))
 	if len(l.lines) > maxLogLines {
 		l.lines = l.lines[len(l.lines)-maxLogLines:]
 	}
@@ -199,7 +204,7 @@ func (l *logsModel) view() string {
 
 	if l.err != nil {
 		b.WriteString("\n")
-		b.WriteString(styleErr.Render(l.err.Error()))
+		b.WriteString(styleErr.Render(termsafe.String(l.err.Error())))
 		b.WriteString("\n")
 	}
 

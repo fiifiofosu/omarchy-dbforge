@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -16,6 +17,7 @@ import (
 	"github.com/fiifiofosu/dbforge/internal/engines"
 	"github.com/fiifiofosu/dbforge/internal/model"
 	"github.com/fiifiofosu/dbforge/internal/runtime"
+	"github.com/fiifiofosu/dbforge/internal/termsafe"
 )
 
 const usage = `dbctl - manage local database instances
@@ -378,7 +380,19 @@ func cmdLogs(ctx context.Context, c *Client, args []string) error {
 	if id == "" {
 		return fmt.Errorf("usage: dbctl logs <id> [--follow]")
 	}
-	return c.Logs(ctx, id, *follow, *tail, os.Stdout)
+	return c.Logs(ctx, id, *follow, *tail, logOutput(os.Stdout))
+}
+
+// logOutput filters log text bound for a terminal. Database logs carry text
+// from whoever can reach the database, and printed raw an escape sequence in
+// them is an instruction to the terminal -- OSC 52, for one, sets the
+// clipboard. Redirected to a file or a pipe the bytes are left exact: that
+// is a copy of the log, and nothing interprets it until it is printed.
+func logOutput(f *os.File) io.Writer {
+	if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return termsafe.NewWriter(f)
+	}
+	return f
 }
 
 func cmdConn(ctx context.Context, c *Client, args []string) error {

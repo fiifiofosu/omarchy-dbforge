@@ -174,3 +174,28 @@ func TestLogScrollingStaysInBounds(t *testing.T) {
 	}
 	_ = m.logs.view()
 }
+
+// A database client controls what its server logs. An OSC 52 sequence in a
+// log line would set the user's clipboard in a terminal that allows it, so
+// the log view must never pass one through.
+func TestLogLinesAreTerminalSafe(t *testing.T) {
+	var l logsModel
+	l.width, l.height = 120, 40
+	l.append(logLineMsg("ERROR:  relation \"x\x1b]52;c;cHduZWQ=\x07\" does not exist"))
+	l.append(logLineMsg("\x1b[2J\x1b]0;owned\x1b\\\tcleared"))
+
+	for _, line := range l.lines {
+		if strings.ContainsAny(line, "\x1b\x07\u009b\u009d") {
+			t.Fatalf("control sequence survived in stored line %q", line)
+		}
+	}
+	if got, want := l.lines[0], `ERROR:  relation "x" does not exist`; got != want {
+		t.Errorf("line 0 = %q, want %q", got, want)
+	}
+	if got, want := l.lines[1], "    cleared"; got != want {
+		t.Errorf("line 1 = %q, want %q", got, want)
+	}
+	if strings.Contains(l.view(), "]52;") {
+		t.Fatal("OSC 52 payload reached the rendered view")
+	}
+}
